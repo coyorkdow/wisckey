@@ -5,11 +5,10 @@
 #ifndef STORAGE_LEVELDB_DB_VERSION_EDIT_H_
 #define STORAGE_LEVELDB_DB_VERSION_EDIT_H_
 
+#include "db/dbformat.h"
 #include <set>
 #include <utility>
 #include <vector>
-
-#include "db/dbformat.h"
 
 namespace leveldb {
 
@@ -40,6 +39,19 @@ class VersionEdit {
   void SetLogNumber(uint64_t num) {
     has_log_number_ = true;
     log_number_ = num;
+  }
+  void SetVlogHeadPos(uint64_t head) {
+    has_head_info_ = true;
+    head_info_ = head;
+  }
+  void SetVlogTailPos(uint64_t num, uint64_t tail) {
+    has_tail_info_ = true;
+    tail_info_ = tail;
+    tail_vlog_number_ = num;
+  }
+  void SetVlogInfo(const std::string& vlog_info) {
+    vlog_info_ = vlog_info;
+    has_vlog_info_ = true;
   }
   void SetPrevLogNumber(uint64_t num) {
     has_prev_log_number_ = true;
@@ -95,6 +107,26 @@ class VersionEdit {
   bool has_prev_log_number_;
   bool has_next_file_number_;
   bool has_last_sequence_;
+
+  bool has_head_info_;
+  bool has_tail_info_;
+
+  // head of the vlog.
+  uint64_t head_info_;
+
+  // tail of teh vlog. During garbage collection, WiscKey first reads a chunk of
+  // key-value pairs (e.g., several MBs) from the tail of the vLog, then finds
+  // which of those values are valid (not yet overwritten or deleted) by
+  // querying the LSM-tree. WiscKey then appends valid values back to the head
+  // of the vLog.
+  uint64_t tail_info_;
+
+  // We should store the number of the vlog file where the tail position is
+  // located.
+  uint64_t tail_vlog_number_;
+
+  bool has_vlog_info_;
+  std::string vlog_info_;
 
   std::vector<std::pair<int, InternalKey>> compact_pointers_;
   DeletedFileSet deleted_files_;

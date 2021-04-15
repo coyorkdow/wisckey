@@ -9,6 +9,12 @@
 
 namespace leveldb {
 
-Options::Options() : comparator(BytewiseComparator()), env(Env::Default()) {}
-
+Options::Options()
+    : comparator(BytewiseComparator()),
+      env(Env::Default()),
+      clean_write_buffer_size(128 << 10),
+      clean_threshold(300 * 1024 * 1024),
+      min_clean_threshold(clean_threshold / 5),
+      log_dropCount_threshold(100),
+      max_vlog_size(1024 * 1024 * 1024) {}
 }  // namespace leveldb

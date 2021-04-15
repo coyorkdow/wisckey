@@ -6,3 +6,6 @@
 # Build directory.
 build/
 out/
+cmake-build-debug
+cmake-build-release
+.idea
