@@ -67,7 +67,12 @@ class DBIter : public Iterator {
   }
   Slice value() const override {
     assert(valid_);
-    return (direction_ == kForward) ? iter_->value() : saved_value_;
+    if (direction_ == kForward) {
+      db_->Fetch(iter_->value(), &saved_value_);
+    } else {
+      db_->Fetch(saved_addr_, &saved_value_);
+    }
+    return saved_value_;
   }
   Status status() const override {
     if (status_.ok()) {
@@ -93,11 +98,11 @@ class DBIter : public Iterator {
   }
 
   inline void ClearSavedValue() {
-    if (saved_value_.capacity() > 1048576) {
+    if (saved_addr_.capacity() > 1048576) {
       std::string empty;
-      swap(empty, saved_value_);
+      swap(empty, saved_addr_);
     } else {
-      saved_value_.clear();
+      saved_addr_.clear();
     }
   }
 
@@ -112,7 +117,8 @@ class DBIter : public Iterator {
   SequenceNumber const sequence_;
   Status status_;
   std::string saved_key_;    // == current key when direction_==kReverse
-  std::string saved_value_;  // == current raw value when direction_==kReverse
+  std::string saved_addr_;  // == current raw value when direction_==kReverse
+  mutable std::string saved_value_;
   Direction direction_;
   bool valid_;
   Random rnd_;
@@ -252,12 +258,12 @@ void DBIter::FindPrevUserEntry() {
           ClearSavedValue();
         } else {
           Slice raw_value = iter_->value();
-          if (saved_value_.capacity() > raw_value.size() + 1048576) {
+          if (saved_addr_.capacity() > raw_value.size() + 1048576) {
             std::string empty;
-            swap(empty, saved_value_);
+            swap(empty, saved_addr_);
           }
           SaveKey(ExtractUserKey(iter_->key()), &saved_key_);
-          saved_value_.assign(raw_value.data(), raw_value.size());
+          saved_addr_.assign(raw_value.data(), raw_value.size());
         }
       }
       iter_->Prev();

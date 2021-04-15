@@ -18,7 +18,9 @@
 #include "db/dbformat.h"
 #include "db/memtable.h"
 #include "db/write_batch_internal.h"
+
 #include "leveldb/db.h"
+
 #include "util/coding.h"
 
 namespace leveldb {
@@ -63,6 +65,67 @@ Status WriteBatch::Iterate(Handler* handler) const {
         break;
       case kTypeDeletion:
         if (GetLengthPrefixedSlice(&input, &key)) {
+          handler->Delete(key);
+        } else {
+          return Status::Corruption("bad WriteBatch Delete");
+        }
+        break;
+      default:
+        return Status::Corruption("unknown WriteBatch tag");
+    }
+  }
+  if (found != WriteBatchInternal::Count(this)) {
+    return Status::Corruption("WriteBatch has wrong count");
+  } else {
+    return Status::OK();
+  }
+}
+
+Status WriteBatch::Iterate(Handler* handler, const uint64_t vlog_number,
+                           size_t* vlog_head) const {
+  Slice input(rep_);
+  if (input.size() < kHeader) {
+    return Status::Corruption("malformed WriteBatch (too small)");
+  }
+
+  input.remove_prefix(kHeader);
+  *vlog_head += kHeader;
+  const char* last_pos = input.data();
+  Slice key, value;
+  std::string address;  // address is <vlog_number, vlog_offset, size>
+  address.reserve(30);
+  int found = 0;
+  while (!input.empty()) {
+    found++;
+    char tag = input[0];
+    input.remove_prefix(1);
+    switch (tag) {
+      case kTypeValue:
+        if (GetLengthPrefixedSlice(&input, &key) &&
+            GetLengthPrefixedSlice(&input, &value)) {
+          address.clear();
+          size_t size = input.data() - last_pos;
+          PutVarint64(&address, vlog_number);
+          PutVarint64(&address, *vlog_head);
+          PutVarint64(&address, size);
+          handler->Put(key, address);
+
+//          std::fprintf(stdout,
+//                       "write: file_numb is %llu, pos is %zu, size is %zu, key "
+//                       "is %s, val is %s\n",
+//                       vlog_number, *vlog_head, size, key.data(), value.data());
+//          fflush(stdout);
+
+          last_pos = input.data();
+          *vlog_head += size;
+        } else {
+          return Status::Corruption("bad WriteBatch Put");
+        }
+        break;
+      case kTypeDeletion:
+        if (GetLengthPrefixedSlice(&input, &key)) {
+          *vlog_head += input.data() - last_pos;
+          last_pos = input.data();
           handler->Delete(key);
         } else {
           return Status::Corruption("bad WriteBatch Delete");
@@ -145,6 +208,16 @@ void WriteBatchInternal::Append(WriteBatch* dst, const WriteBatch* src) {
   SetCount(dst, Count(dst) + Count(src));
   assert(src->rep_.size() >= kHeader);
   dst->rep_.append(src->rep_.data() + kHeader, src->rep_.size() - kHeader);
+}
+
+Status WriteBatchInternal::InsertAddressInto(const WriteBatch* batch,
+                                             uint64_t vlog_number,
+                                             MemTable* memTable,
+                                             size_t* vlog_head) {
+  MemTableInserter inserter;
+  inserter.sequence_ = WriteBatchInternal::Sequence(batch);
+  inserter.mem_ = memTable;
+  return batch->Iterate(&inserter, vlog_number, vlog_head);
 }
 
 }  // namespace leveldb

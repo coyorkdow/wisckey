@@ -15,12 +15,12 @@
 #ifndef STORAGE_LEVELDB_DB_VERSION_SET_H_
 #define STORAGE_LEVELDB_DB_VERSION_SET_H_
 
+#include "db/dbformat.h"
+#include "db/version_edit.h"
 #include <map>
 #include <set>
 #include <vector>
 
-#include "db/dbformat.h"
-#include "db/version_edit.h"
 #include "port/port.h"
 #include "port/thread_annotations.h"
 
@@ -193,12 +193,20 @@ class VersionSet {
   // Allocate and return a new file number
   uint64_t NewFileNumber() { return next_file_number_++; }
 
+  uint64_t NewVlogNumber() { return ++log_number_; }
+
   // Arrange to reuse "file_number" unless a newer file number has
   // already been allocated.
   // REQUIRES: "file_number" was returned by a call to NewFileNumber().
   void ReuseFileNumber(uint64_t file_number) {
     if (next_file_number_ == file_number + 1) {
       next_file_number_ = file_number;
+    }
+  }
+
+  void ReuseVlogNumber(uint64_t file_number) {
+    if (log_number_ == file_number) {
+      log_number_ = file_number - 1;
     }
   }
 
@@ -222,6 +230,14 @@ class VersionSet {
 
   // Return the current log file number.
   uint64_t LogNumber() const { return log_number_; }
+
+  uint64_t VlogHeadPos() const { return head_info_; }
+
+  uint64_t VlogTailPos() const { return tail_info_; }
+
+  uint64_t VlogTailNumber() const { return tail_vlog_number_; }
+
+  const std::string& VlogInfo() const { return vlog_info_; }
 
   // Return the log file number for the log file that is currently
   // being compacted, or zero if there is no such log file.
@@ -303,6 +319,11 @@ class VersionSet {
   uint64_t last_sequence_;
   uint64_t log_number_;
   uint64_t prev_log_number_;  // 0 or backing store for memtable being compacted
+
+  uint64_t head_info_;
+  uint64_t tail_info_;
+  uint64_t tail_vlog_number_;
+  std::string vlog_info_;
 
   // Opened lazily
   WritableFile* descriptor_file_;

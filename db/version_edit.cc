@@ -5,6 +5,7 @@
 #include "db/version_edit.h"
 
 #include "db/version_set.h"
+
 #include "util/coding.h"
 
 namespace leveldb {
@@ -20,7 +21,10 @@ enum Tag {
   kDeletedFile = 6,
   kNewFile = 7,
   // 8 was used for large value refs
-  kPrevLogNumber = 9
+  kPrevLogNumber = 9,
+  kHead = 10,
+  kVlogInfo = 11,
+  kTail = 12
 };
 
 void VersionEdit::Clear() {
@@ -36,6 +40,14 @@ void VersionEdit::Clear() {
   has_last_sequence_ = false;
   deleted_files_.clear();
   new_files_.clear();
+
+  vlog_info_.clear();
+  has_vlog_info_ = false;
+  has_head_info_ = false;
+  has_tail_info_ = false;
+  head_info_ = 0;
+  tail_info_ = 0;
+  tail_vlog_number_ = 0;
 }
 
 void VersionEdit::EncodeTo(std::string* dst) const {
@@ -58,6 +70,19 @@ void VersionEdit::EncodeTo(std::string* dst) const {
   if (has_last_sequence_) {
     PutVarint32(dst, kLastSequence);
     PutVarint64(dst, last_sequence_);
+  }
+  if (has_head_info_) {
+    PutVarint32(dst, kHead);
+    PutVarint64(dst, head_info_);
+  }
+  if (has_tail_info_) {
+    PutVarint32(dst, kTail);
+    PutVarint64(dst, tail_vlog_number_);
+    PutVarint64(dst, tail_info_);
+  }
+  if (has_vlog_info_) {
+    PutVarint32(dst, kVlogInfo);
+    PutLengthPrefixedSlice(dst, vlog_info_);
   }
 
   for (size_t i = 0; i < compact_pointers_.size(); i++) {
@@ -182,6 +207,32 @@ Status VersionEdit::DecodeFrom(const Slice& src) {
           new_files_.push_back(std::make_pair(level, f));
         } else {
           msg = "new-file entry";
+        }
+        break;
+
+      case kVlogInfo:
+        if (GetLengthPrefixedSlice(&input, &str)) {
+          vlog_info_ = str.ToString();
+          has_vlog_info_ = true;
+        } else {
+          msg = "vlog info";
+        }
+        break;
+
+      case kHead:
+        if (GetVarint64(&input, &head_info_)) {
+          has_head_info_ = true;
+        } else {
+          msg = "head info";
+        }
+        break;
+
+      case kTail:
+        if (GetVarint64(&input, &tail_vlog_number_) &&
+            GetVarint64(&input, &tail_info_)) {
+          has_tail_info_ = true;
+        } else {
+          msg = "tail info";
         }
         break;
 

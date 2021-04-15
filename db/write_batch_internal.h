@@ -6,6 +6,7 @@
 #define STORAGE_LEVELDB_DB_WRITE_BATCH_INTERNAL_H_
 
 #include "db/dbformat.h"
+
 #include "leveldb/write_batch.h"
 
 namespace leveldb {
@@ -36,6 +37,9 @@ class WriteBatchInternal {
   static void SetContents(WriteBatch* batch, const Slice& contents);
 
   static Status InsertInto(const WriteBatch* batch, MemTable* memtable);
+
+  static Status InsertAddressInto(const WriteBatch* batch, uint64_t vlog_number,
+                               MemTable* memTable, size_t* vlog_head);
 
   static void Append(WriteBatch* dst, const WriteBatch* src);
 };

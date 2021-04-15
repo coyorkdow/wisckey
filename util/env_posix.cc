@@ -2,16 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
-#include <dirent.h>
-#include <fcntl.h>
-#include <pthread.h>
-#include <sys/mman.h>
-#include <sys/resource.h>
-#include <sys/stat.h>
-#include <sys/time.h>
-#include <sys/types.h>
-#include <unistd.h>
-
 #include <atomic>
 #include <cerrno>
 #include <cstddef>
@@ -19,17 +9,27 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <dirent.h>
+#include <fcntl.h>
 #include <limits>
+#include <pthread.h>
 #include <queue>
 #include <set>
 #include <string>
+#include <sys/mman.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <sys/types.h>
 #include <thread>
 #include <type_traits>
+#include <unistd.h>
 #include <utility>
 
 #include "leveldb/env.h"
 #include "leveldb/slice.h"
 #include "leveldb/status.h"
+
 #include "port/port.h"
 #include "port/thread_annotations.h"
 #include "util/env_posix_test_helper.h"
@@ -130,6 +130,13 @@ class PosixSequentialFile final : public SequentialFile {
 
   Status Skip(uint64_t n) override {
     if (::lseek(fd_, n, SEEK_CUR) == static_cast<off_t>(-1)) {
+      return PosixError(filename_, errno);
+    }
+    return Status::OK();
+  }
+
+  Status Jump(uint64_t n) override {
+    if (::lseek(fd_, n, SEEK_SET) == static_cast<off_t>(-1)) {
       return PosixError(filename_, errno);
     }
     return Status::OK();
