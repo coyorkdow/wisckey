@@ -4,26 +4,28 @@
 
 #include "leveldb/db.h"
 
-#include <atomic>
-#include <cinttypes>
-#include <string>
-
-#include "gtest/gtest.h"
-#include "benchmark/benchmark.h"
 #include "db/db_impl.h"
 #include "db/filename.h"
 #include "db/version_set.h"
 #include "db/write_batch_internal.h"
+#include <atomic>
+#include <cinttypes>
+#include <string>
+
 #include "leveldb/cache.h"
 #include "leveldb/env.h"
 #include "leveldb/filter_policy.h"
 #include "leveldb/table.h"
+
 #include "port/port.h"
 #include "port/thread_annotations.h"
 #include "util/hash.h"
 #include "util/logging.h"
 #include "util/mutexlock.h"
 #include "util/testutil.h"
+
+#include "benchmark/benchmark.h"
+#include "gtest/gtest.h"
 
 namespace leveldb {
 
@@ -198,6 +200,49 @@ class SpecialEnv : public EnvWrapper {
         *r = new DataFile(this, *r);
       } else if (strstr(f.c_str(), "MANIFEST") != nullptr) {
         *r = new ManifestFile(this, *r);
+      }
+    }
+    return s;
+  }
+
+  Status NewAppendableFile(const std::string& f, WritableFile** r) {
+    class DataFile : public WritableFile {
+     private:
+      SpecialEnv* env_;
+      WritableFile* base_;
+
+     public:
+      DataFile(SpecialEnv* env, WritableFile* base) : env_(env), base_(base) {}
+      ~DataFile() { delete base_; }
+      Status Append(const Slice& data) {
+        if (env_->no_space_.load()) {
+          // Drop writes on the floor
+          return Status::OK();
+        } else {
+          return base_->Append(data);
+        }
+      }
+      Status Close() { return base_->Close(); }
+      Status Flush() { return base_->Flush(); }
+      Status Sync() {
+        if (env_->data_sync_error_.load()) {
+          return Status::IOError("simulated data sync error");
+        }
+        while (env_->delay_data_sync_.load()) {
+          DelayMilliseconds(100);
+        }
+        return base_->Sync();
+      }
+    };
+
+    if (non_writable_.load()) {
+      return Status::IOError("simulated write error");
+    }
+
+    Status s = target()->NewAppendableFile(f, r);
+    if (s.ok()) {
+      if (strstr(f.c_str(), ".log") != nullptr) {
+        *r = new DataFile(this, *r);
       }
     }
     return s;
@@ -385,9 +430,11 @@ class DBTest : public testing::Test {
           }
           first = false;
           switch (ikey.type) {
-            case kTypeValue:
-              result += iter->value().ToString();
-              break;
+            case kTypeValue: {
+              std::string val;
+              dbfull()->Fetch(iter->value(), &val);
+              result += val;
+            } break;
             case kTypeDeletion:
               result += "DEL";
               break;
@@ -1028,19 +1075,19 @@ TEST_F(DBTest, RecoverDuringMemtableCompaction) {
     options.write_buffer_size = 1000000;
     Reopen(&options);
 
+    std::string big1(10000000, 'x'), big2(1000, 'y');
+
     // Trigger a long memtable compaction and reopen the database during it
     ASSERT_LEVELDB_OK(Put("foo", "v1"));  // Goes to 1st log file
-    ASSERT_LEVELDB_OK(
-        Put("big1", std::string(10000000, 'x')));  // Fills memtable
-    ASSERT_LEVELDB_OK(
-        Put("big2", std::string(1000, 'y')));  // Triggers compaction
-    ASSERT_LEVELDB_OK(Put("bar", "v2"));       // Goes to new log file
+    ASSERT_LEVELDB_OK(Put(big1, big1));   // Fills memtable
+    ASSERT_LEVELDB_OK(Put(big2, big2));   // Triggers compaction
+    ASSERT_LEVELDB_OK(Put("bar", "v2"));  // Goes to new log file
 
     Reopen(&options);
     ASSERT_EQ("v1", Get("foo"));
     ASSERT_EQ("v2", Get("bar"));
-    ASSERT_EQ(std::string(10000000, 'x'), Get("big1"));
-    ASSERT_EQ(std::string(1000, 'y'), Get("big2"));
+    ASSERT_EQ(big1, Get(big1));
+    ASSERT_EQ(big2, Get(big2));
   } while (ChangeOptions());
 }
 
@@ -1059,19 +1106,22 @@ TEST_F(DBTest, MinorCompactionsHappen) {
 
   int starting_num_tables = TotalTableFiles();
   for (int i = 0; i < N; i++) {
-    ASSERT_LEVELDB_OK(Put(Key(i), Key(i) + std::string(1000, 'v')));
+    ASSERT_LEVELDB_OK(
+        Put(Key(i) + std::string(1000, 'k'), Key(i) + std::string(1000, 'v')));
   }
   int ending_num_tables = TotalTableFiles();
   ASSERT_GT(ending_num_tables, starting_num_tables);
 
   for (int i = 0; i < N; i++) {
-    ASSERT_EQ(Key(i) + std::string(1000, 'v'), Get(Key(i)));
+    ASSERT_EQ(Key(i) + std::string(1000, 'v'),
+              Get(Key(i) + std::string(1000, 'k')));
   }
 
   Reopen();
 
   for (int i = 0; i < N; i++) {
-    ASSERT_EQ(Key(i) + std::string(1000, 'v'), Get(Key(i)));
+    ASSERT_EQ(Key(i) + std::string(1000, 'v'),
+              Get(Key(i) + std::string(1000, 'k')));
   }
 }
 
@@ -1079,8 +1129,10 @@ TEST_F(DBTest, RecoverWithLargeLog) {
   {
     Options options = CurrentOptions();
     Reopen(&options);
-    ASSERT_LEVELDB_OK(Put("big1", std::string(200000, '1')));
-    ASSERT_LEVELDB_OK(Put("big2", std::string(200000, '2')));
+    ASSERT_LEVELDB_OK(
+        Put("big1" + std::string(200000, '1'), std::string(200000, '1')));
+    ASSERT_LEVELDB_OK(
+        Put("big2" + std::string(200000, '2'), std::string(200000, '2')));
     ASSERT_LEVELDB_OK(Put("small3", std::string(10, '3')));
     ASSERT_LEVELDB_OK(Put("small4", std::string(10, '4')));
     ASSERT_EQ(NumTableFilesAtLevel(0), 0);
@@ -1092,8 +1144,8 @@ TEST_F(DBTest, RecoverWithLargeLog) {
   options.write_buffer_size = 100000;
   Reopen(&options);
   ASSERT_EQ(NumTableFilesAtLevel(0), 3);
-  ASSERT_EQ(std::string(200000, '1'), Get("big1"));
-  ASSERT_EQ(std::string(200000, '2'), Get("big2"));
+  ASSERT_EQ(std::string(200000, '1'), Get("big1" + std::string(200000, '1')));
+  ASSERT_EQ(std::string(200000, '2'), Get("big2" + std::string(200000, '2')));
   ASSERT_EQ(std::string(10, '3'), Get("small3"));
   ASSERT_EQ(std::string(10, '4'), Get("small4"));
   ASSERT_GT(NumTableFilesAtLevel(0), 1);
@@ -1111,7 +1163,7 @@ TEST_F(DBTest, CompactionsGenerateMultipleFiles) {
   std::vector<std::string> values;
   for (int i = 0; i < 80; i++) {
     values.push_back(RandomString(&rnd, 100000));
-    ASSERT_LEVELDB_OK(Put(Key(i), values[i]));
+    ASSERT_LEVELDB_OK(Put(Key(i) + values[i], values[i]));
   }
 
   // Reopening moves updates to level-0
@@ -1121,7 +1173,7 @@ TEST_F(DBTest, CompactionsGenerateMultipleFiles) {
   ASSERT_EQ(NumTableFilesAtLevel(0), 0);
   ASSERT_GT(NumTableFilesAtLevel(1), 1);
   for (int i = 0; i < 80; i++) {
-    ASSERT_EQ(Get(Key(i)), values[i]);
+    ASSERT_EQ(Get(Key(i) + values[i]), values[i]);
   }
 }
 
@@ -1764,14 +1816,14 @@ TEST_F(DBTest, NonWritableFileSystem) {
   options.write_buffer_size = 1000;
   options.env = env_;
   Reopen(&options);
-  ASSERT_LEVELDB_OK(Put("foo", "v1"));
+  std::string big(100000, 'x');
+  ASSERT_LEVELDB_OK(Put(big, "v1"));
   // Force errors for new files.
   env_->non_writable_.store(true, std::memory_order_release);
-  std::string big(100000, 'x');
   int errors = 0;
   for (int i = 0; i < 20; i++) {
     std::fprintf(stderr, "iter %d; errors %d\n", i, errors);
-    if (!Put("foo", big).ok()) {
+    if (!Put(big, big).ok()) {
       errors++;
       DelayMilliseconds(100);
     }
