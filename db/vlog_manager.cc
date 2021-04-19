@@ -1,3 +1,4 @@
+
 #include "db/vlog_manager.h"
 
 #include "db/vlog_reader.h"
@@ -12,13 +13,14 @@ VlogManager::VlogManager(uint64_t clean_threshold)
 
 VlogManager::~VlogManager() {
   for (auto& it : manager_) {
-    delete it.second.vlog_;
+    delete it.second.vlog_cache_;
   }
 }
 
-void VlogManager::AddVlog(uint64_t vlog_numb, VReader* vlog) {
+void VlogManager::AddVlog(const std::string& dbname, const Options& options,
+                          uint64_t vlog_numb) {
   VlogInfo v;
-  v.vlog_ = vlog;
+  v.vlog_cache_ = new VlogCache(dbname, options, vlog_numb, 1 << 16);
   v.count_ = 0;
   manager_[vlog_numb] = v;
   now_vlog_ = vlog_numb;
@@ -29,7 +31,6 @@ void VlogManager::SetCurrentVlog(uint64_t vlog_numb) { now_vlog_ = vlog_numb; }
 //与GetVlogsToClean对应
 void VlogManager::RemoveCleaningVlog(uint64_t vlog_numb) {
   std::map<uint64_t, VlogInfo>::const_iterator iter = manager_.find(vlog_numb);
-  delete iter->second.vlog_;
   manager_.erase(iter);
   cleaning_vlog_set_.erase(vlog_numb);
 }
@@ -57,15 +58,6 @@ uint64_t VlogManager::GetVlogToClean() {
   std::set<uint64_t>::iterator iter = cleaning_vlog_set_.begin();
   assert(iter != cleaning_vlog_set_.end());
   return *iter;
-}
-
-VReader* VlogManager::GetVlog(uint64_t vlog_numb) {
-  std::map<uint64_t, VlogInfo>::const_iterator iter = manager_.find(vlog_numb);
-  if (iter == manager_.end()) {
-    return nullptr;
-  } else {
-    return iter->second.vlog_;
-  }
 }
 
 bool VlogManager::HasVlogToClean() { return !cleaning_vlog_set_.empty(); }
@@ -108,6 +100,28 @@ bool VlogManager::NeedRecover(uint64_t vlog_numb) {
   } else {
     return false;  //不需要recoverclean,即没有清理一半的vlog
   }
+}
+
+Status VlogManager::FetchValueFromVlog(Slice addr, std::string* value) {
+  Status s;
+  uint64_t file_numb, offset, size;
+  // address is <vlog_number, vlog_offset, size>
+  if (!GetVarint64(&addr, &file_numb))
+    return Status::Corruption("parse size false in RealValue");
+  if (!GetVarint64(&addr, &offset))
+    return Status::Corruption("parse file_numb false in RealValue");
+  if (!GetVarint64(&addr, &size))
+    return Status::Corruption("parse pos false in RealValue");
+
+  std::map<uint64_t, VlogInfo>::const_iterator iter = manager_.find(file_numb);
+  if (iter == manager_.end() || iter->second.vlog_cache_ == nullptr) {
+    s = Status::Corruption("can not find vlog");
+  } else {
+    VlogCache* cache = iter->second.vlog_cache_;
+    s = cache->Get(offset, size, value);
+  }
+
+  return s;
 }
 
 }  // namespace vlog

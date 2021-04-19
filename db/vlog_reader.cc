@@ -2,11 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
+#include "db/vlog_reader.h"
+
+#include "db/vlog_manager.h"
 #include <cstdio>
 
-#include "db/vlog_reader.h"
-#include "db/vlog_manager.h"
 #include "leveldb/env.h"
+
 #include "util/coding.h"
 #include "util/crc32c.h"
 #include "util/mutexlock.h"
@@ -17,17 +19,6 @@ using namespace log;
 
 VReader::Reporter::~Reporter() {}
 
-VReader::VReader(SequentialFile* file, bool checksum, uint64_t initial_offset)
-    : file_(file),
-      reporter_(nullptr),
-      checksum_(checksum),
-      //一次从磁盘读kblocksize，多余的做缓存以便下次读
-      backing_store_(new char[kBlockSize]),
-      buffer_(),
-      eof_(false) {
-  if (initial_offset > 0) JumpToPos(initial_offset);
-}
-
 VReader::VReader(SequentialFile* file, Reporter* reporter, bool checksum,
                  uint64_t initial_offset)
     : file_(file),
@@ -37,23 +28,12 @@ VReader::VReader(SequentialFile* file, Reporter* reporter, bool checksum,
       backing_store_(new char[kBlockSize]),
       buffer_(),
       eof_(false) {
-  if (initial_offset > 0) JumpToPos(initial_offset);
+  file->Skip(initial_offset);
 }
 
 VReader::~VReader() {
   delete[] backing_store_;
   delete file_;
-}
-
-bool VReader::JumpToPos(size_t pos) {
-  if (pos > 0) {  //跳到距file文件头偏移pos的地方
-    Status skip_status = file_->Jump(pos);
-    if (!skip_status.ok()) {
-      ReportDrop(pos, skip_status);
-      return false;
-    }
-  }
-  return true;
 }
 
 bool VReader::ReadRecord(Slice* record, std::string* scratch) {
@@ -161,20 +141,6 @@ bool VReader::ReadRecord(Slice* record, std::string* scratch) {
     *record = Slice(*scratch);
     return true;
   }
-}
-
-bool VReader::Read(char* val, size_t size, size_t pos) {
-  MutexLock l(&mutex_);
-  if (!JumpToPos(pos)) {
-    return false;
-  }
-  Slice buffer;
-  Status status = file_->Read(size, &buffer, val);
-  if (!status.ok() || buffer.size() != size) {
-    ReportDrop(size, status);
-    return false;
-  }
-  return true;
 }
 
 void VReader::ReportCorruption(uint64_t bytes, const char* reason) {
