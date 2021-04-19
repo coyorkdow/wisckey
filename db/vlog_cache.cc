@@ -12,54 +12,45 @@ Status VlogCache::Get(const uint64_t offset, const uint64_t size,
                       std::string* value) {
   Cache::Handle* handle;
   char buf[8];
+  char* scratch;
   EncodeFixed64(buf, offset);
-  Slice key(buf, 8);
+  Slice key(buf, 8), result;
   Status s;
   if ((handle = cache_->Lookup(key)) != nullptr) {
-    const char* data_ = reinterpret_cast<char*>(cache_->Value(handle));
-    size_t size_ = DecodeFixed64(data_);
-    value->assign(data_ + 8, size_);
+    result = Slice(reinterpret_cast<char*>(cache_->Value(handle)), size);
   } else {
-    MutexLock l(&mutex_);
-    char* data;
-    char* scratch;
-    if (size <= buffer_size) {
-      scratch = buffer_;
-    } else {
-      scratch = new char[size];
-    }
-    Slice result;
+    scratch = new char[size];
+    mutex_.Lock();
     file_->Jump(offset);
     s = file_->Read(size, &result, scratch);
-    if (!s.ok()) {
-      return s;
-    }
-    Slice k, v;
-    assert(result[0] == kTypeValue);
-    result.remove_prefix(1);
-    if (GetLengthPrefixedSlice(&result, &k) &&
-        GetLengthPrefixedSlice(&result, &v)) {
-      //      std::fprintf(stdout,
-      //                   "fetch: file_numb is %llu, pos is %llu, size is %llu,
-      //                   key " "is %s, val is %s\n", file_numb, pos, size,
-      //                   k.data(), v.data());
-      //      fflush(stdout);
-      data = new char[v.size() + 8];
-      EncodeFixed64(data, v.size());
-      memcpy(data + 8, v.data(), v.size());
-      value->assign(v.data(), v.size());
-      handle = cache_->Insert(key, data, 1, [](const Slice& key, void* value) {
-        delete[] reinterpret_cast<char*>(value);
-      });
-    } else {
-      s = Status::Corruption("failed to decode value from vlog");
-    }
+    mutex_.Unlock();
+  }
+  if (!s.ok()) {
+    return s;
+  }
 
-    if (scratch != buffer_) {
-      delete[] scratch;
-    }
+  Slice k, v;
+  assert(result[0] == kTypeValue);
+  result.remove_prefix(1);
+  if (GetLengthPrefixedSlice(&result, &k) &&
+      GetLengthPrefixedSlice(&result, &v)) {
+    //      std::fprintf(stdout,
+    //                   "fetch: file_numb is %llu, pos is %llu, size is %llu,
+    //                   key " "is %s, val is %s\n", file_numb, pos, size,
+    //                   k.data(), v.data());
+    //      fflush(stdout);
+    value->assign(v.data(), v.size());
+  } else {
+    s = Status::Corruption("failed to decode value from vlog");
+  }
+
+  if (handle == nullptr) {
+    handle = cache_->Insert(key, scratch, 1, [](const Slice& key, void* value) {
+      delete[] reinterpret_cast<char*>(value);
+    });
   }
   cache_->Release(handle);
+
   return s;
 }
 

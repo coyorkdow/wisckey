@@ -22,13 +22,12 @@ class VlogCache {
 
   ~VlogCache();
 
-  Status Get(uint64_t offset, uint64_t size, std::string *value);
+  Status Get(uint64_t offset, uint64_t size, std::string* value);
 
   static const int buffer_size = 1 << 16;
 
  private:
-  SequentialFile* file_;
-  char buffer_[buffer_size];
+  SequentialFile* file_ GUARDED_BY(mutex_);
   Cache* cache_;
 
   port::Mutex mutex_;
