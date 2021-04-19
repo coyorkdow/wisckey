@@ -10,21 +10,19 @@ namespace vlog {
 
 Status VlogCache::Get(const uint64_t offset, const uint64_t size,
                       std::string* value) {
-  Cache::Handle* handle;
-  char buf[8];
-  char* scratch;
-  EncodeFixed64(buf, offset);
-  Slice key(buf, 8), result;
+  const char* scratch;
+  Slice result;
   Status s;
-  if ((handle = cache_->Lookup(key)) != nullptr) {
-    result = Slice(reinterpret_cast<char*>(cache_->Value(handle)), size);
+  mutex_.Lock();
+  if ((scratch = cache_.Find(offset)) != nullptr) {
+    result = Slice(scratch, size);
   } else {
     scratch = new char[size];
-    mutex_.Lock();
     file_->Jump(offset);
-    s = file_->Read(size, &result, scratch);
-    mutex_.Unlock();
+    s = file_->Read(size, &result, const_cast<char*>(scratch));
+    cache_.Insert(offset, scratch);
   }
+  mutex_.Unlock();
   if (!s.ok()) {
     return s;
   }
@@ -44,28 +42,18 @@ Status VlogCache::Get(const uint64_t offset, const uint64_t size,
     s = Status::Corruption("failed to decode value from vlog");
   }
 
-  if (handle == nullptr) {
-    handle = cache_->Insert(key, scratch, 1, [](const Slice& key, void* value) {
-      delete[] reinterpret_cast<char*>(value);
-    });
-  }
-  cache_->Release(handle);
-
   return s;
 }
 
 VlogCache::VlogCache(const std::string& dbname, const Options& options,
                      const uint32_t log_number, int entries)
-    : cache_(NewLRUCache(entries)) {
+    : cache_(entries) {
   Status s =
       options.env->NewSequentialFile(LogFileName(dbname, log_number), &file_);
   assert(s.ok());
 }
 
-VlogCache::~VlogCache() {
-  delete cache_;
-  delete file_;
-}
+VlogCache::~VlogCache() { delete file_; }
 
 }  // namespace vlog
 }  // namespace leveldb
