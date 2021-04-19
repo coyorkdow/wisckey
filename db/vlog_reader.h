@@ -29,17 +29,12 @@ class VReader {
     virtual void Corruption(size_t bytes, const Status& status) = 0;
   };
 
-  VReader(SequentialFile* file, bool checksum,
-          uint64_t initial_offset = 0);  //传入的file必须是new出来的
   VReader(SequentialFile* file, Reporter* reporter, bool checksum,
           uint64_t initial_offset = 0);
 
   ~VReader();
 
-  bool Read(char* val, size_t size, size_t pos);
-  //读取一条完整的日志记录到record，record的内容可能在scratch，也可能在backing_store_中
   bool ReadRecord(Slice* record, std::string* scratch);
-  bool JumpToPos(size_t pos);  //跳到文件指定偏移
   bool DeallocateDiskSpace(uint64_t offset, size_t len);
 
  private:

@@ -356,10 +356,7 @@ Status DBImpl::Recover(VersionEdit* edit, bool* save_manifest) {
       if (type == kLogFile && ((number >= min_log) || (number == prev_log))) {
         logs.push_back(number);
         std::string vlog_name = LogFileName(dbname_, number);
-        SequentialFile* vlr_file;
-        s = options_.env->NewSequentialFile(vlog_name, &vlr_file);
-        vlog::VReader* vlog_reader = new vlog::VReader(vlr_file, true, 0);
-        vlog_manager_.AddVlog(number, vlog_reader);
+        vlog_manager_.AddVlog(dbname_, options_, number);
       }
     }
   }
@@ -1168,58 +1165,11 @@ Status DBImpl::Get(const ReadOptions& options, const Slice& key,
   //  return s;
 
   if (!s.ok()) return s;
-  return Fetch(addr, value);
+  return vlog_manager_.FetchValueFromVlog(addr, value);
 }
 
 Status DBImpl::Fetch(Slice addr, std::string* value) {
-  Status s;
-  uint64_t file_numb, pos, size;
-  // address is <vlog_number, vlog_offset, size>
-  if (!GetVarint64(&addr, &file_numb))
-    return Status::Corruption("parse size false in RealValue");
-  if (!GetVarint64(&addr, &pos))
-    return Status::Corruption("parse file_numb false in RealValue");
-  if (!GetVarint64(&addr, &size))
-    return Status::Corruption("parse pos false in RealValue");
-  vlog::VReader* vlog_reader = vlog_manager_.GetVlog(file_numb);
-
-  //  std::fprintf(stdout, vlog_reader == nullptr ? "vlog_reader is nullptr\n"
-  //                                              : "vlog_reader is not
-  //                                              nullptr\n");
-
-  assert(vlog_reader != nullptr);
-  Slice input;
-  char* buf;
-  if (size < buffer_size_) {
-    vlog_reader->Read(buffer_, size, pos);
-    input = Slice(buffer_, size);
-  } else {
-    buf = new char[size];
-    vlog_reader->Read(buf, size, pos);
-    input = Slice(buf, size);
-  }
-  Slice k, v;
-  char tag = input[0];
-  input.remove_prefix(1);
-  if (tag == kTypeValue) {
-    if (GetLengthPrefixedSlice(&input, &k) &&
-        GetLengthPrefixedSlice(&input, &v)) {
-      //      std::fprintf(stdout,
-      //                   "fetch: file_numb is %llu, pos is %llu, size is %llu,
-      //                   key " "is %s, val is %s\n", file_numb, pos, size,
-      //                   k.data(), v.data());
-      //      fflush(stdout);
-      value->assign(v.data(), v.size());
-    } else {
-      s = Status::Corruption("corrupted key for ");
-    }
-  } else {
-    s = Status::Corruption("corrupted key for ");
-  }
-
-  if (size >= buffer_size_) delete[] buf;
-
-  return s;
+  return vlog_manager_.FetchValueFromVlog(addr, value);
 }
 
 Iterator* DBImpl::NewIterator(const ReadOptions& options) {
@@ -1409,11 +1359,7 @@ Status DBImpl::MakeRoomForWrite(bool force) {
     vlogfile_ = vlfile;
     vlogfile_number_ = new_log_number;
     vlog_ = new vlog::VWriter(vlfile);
-    SequentialFile* vlr_file;
-    s = options_.env->NewSequentialFile(LogFileName(dbname_, new_log_number),
-                                        &vlr_file);
-    vlog::VReader* vlog_reader = new vlog::VReader(vlr_file, true, 0);
-    vlog_manager_.AddVlog(new_log_number, vlog_reader);
+    vlog_manager_.AddVlog(dbname_, options_, new_log_number);
     Log(options_.info_log, "new vlog %d...\n", new_log_number);
   }
   while (true) {
@@ -1447,21 +1393,6 @@ Status DBImpl::MakeRoomForWrite(bool force) {
       Log(options_.info_log, "Too many L0 files; waiting...\n");
       background_work_finished_signal_.Wait();
     } else {
-      // Attempt to switch to a new memtable and trigger compaction of old
-      //      assert(versions_->PrevLogNumber() == 0);
-      //      uint64_t new_log_number = versions_->NewFileNumber();
-      //      WritableFile* lfile = nullptr;
-      //      s = env_->NewWritableFile(LogFileName(dbname_, new_log_number),
-      //      &lfile); if (!s.ok()) {
-      //        // Avoid chewing through file number space in a tight loop.
-      //        versions_->ReuseFileNumber(new_log_number);
-      //        break;
-      //      }
-      //      delete vlog_;
-      //      delete vlogfile_;
-      //      vlogfile_ = lfile;
-      //      vlogfile_number_ = new_log_number;
-      //      vlog_ = new vlog::VWriter(lfile);
       imm_ = mem_;
       has_imm_.store(true, std::memory_order_release);
       mem_ = new MemTable(internal_comparator_);
@@ -1592,13 +1523,7 @@ Status DB::Open(const Options& options, const std::string& dbname, DB** dbptr) {
       impl->vlog_ = new vlog::VWriter(lfile);
       impl->mem_ = new MemTable(impl->internal_comparator_);
       impl->mem_->Ref();
-      SequentialFile* vlr_file;
-      s = options.env->NewSequentialFile(LogFileName(dbname, new_log_number),
-                                         &vlr_file);
-      assert(s.ok());
-      vlog::VReader* vlog_reader = new vlog::VReader(vlr_file, true, 0);
-      assert(vlog_reader != nullptr);
-      impl->vlog_manager_.AddVlog(new_log_number, vlog_reader);
+      impl->vlog_manager_.AddVlog(dbname, options, new_log_number);
     }
   }
   if (s.ok() && save_manifest) {

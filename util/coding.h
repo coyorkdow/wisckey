@@ -15,6 +15,7 @@
 #include <string>
 
 #include "leveldb/slice.h"
+
 #include "port/port.h"
 
 namespace leveldb {
@@ -51,6 +52,12 @@ char* EncodeVarint64(char* dst, uint64_t value);
 // Lower-level versions of Put... that write directly into a character buffer
 // REQUIRES: dst has enough space for the value being written
 
+inline void EncodeFixed16(char* dst, uint16_t value) {
+  uint8_t* const buffer = reinterpret_cast<uint8_t*>(dst);
+  buffer[0] = static_cast<uint8_t>(value);
+  buffer[1] = static_cast<uint8_t>(value >> 8);
+}
+
 inline void EncodeFixed32(char* dst, uint32_t value) {
   uint8_t* const buffer = reinterpret_cast<uint8_t*>(dst);
 
@@ -77,6 +84,13 @@ inline void EncodeFixed64(char* dst, uint64_t value) {
 
 // Lower-level versions of Get... that read directly from a character buffer
 // without any bounds checking.
+
+inline uint16_t DecodeFixed16(const char* ptr) {
+  const uint8_t* const buffer = reinterpret_cast<const uint8_t*>(ptr);
+
+  return (static_cast<uint32_t>(buffer[0])) |
+         (static_cast<uint32_t>(buffer[1]) << 8);
+}
 
 inline uint32_t DecodeFixed32(const char* ptr) {
   const uint8_t* const buffer = reinterpret_cast<const uint8_t*>(ptr);
