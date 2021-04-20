@@ -6,6 +6,7 @@
 #define STORAGE_LEVELDB_INCLUDE_OPTIONS_H_
 
 #include <cstddef>
+#include <cstdint>
 
 #include "leveldb/export.h"
 
@@ -140,6 +141,21 @@ struct LEVELDB_EXPORT Options {
   // Many applications will benefit from passing the result of
   // NewBloomFilterPolicy() here.
   const FilterPolicy* filter_policy = nullptr;
+
+  //垃圾回收的写缓冲区，必须要大于12
+  uint64_t clean_write_buffer_size;
+
+  // vlog文件垃圾记录条数达到多少条时开始进行垃圾回收
+  uint64_t clean_threshold;
+
+  // vlog进行手动清理时，只有文件垃圾记录条数达到min_clean_threshold才会清理
+  uint64_t min_clean_threshold;
+
+  //与持久化vloginfo有关的，合并后新产生log_dropCount_threshold条垃圾记录时持久化vloginfo
+  uint64_t log_dropCount_threshold;
+
+  // vlog文件大小上限值
+  uint64_t max_vlog_size;
 };
 
 // Options that control read operations

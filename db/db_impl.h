@@ -5,16 +5,20 @@
 #ifndef STORAGE_LEVELDB_DB_DB_IMPL_H_
 #define STORAGE_LEVELDB_DB_DB_IMPL_H_
 
+#include "db/dbformat.h"
+#include "db/log_writer.h"
+#include "db/snapshot.h"
+#include "db/vlog_manager.h"
+#include "db/vlog_reader.h"
+#include "db/vlog_writer.h"
 #include <atomic>
 #include <deque>
 #include <set>
 #include <string>
 
-#include "db/dbformat.h"
-#include "db/log_writer.h"
-#include "db/snapshot.h"
 #include "leveldb/db.h"
 #include "leveldb/env.h"
+
 #include "port/port.h"
 #include "port/thread_annotations.h"
 
@@ -42,6 +46,8 @@ class DBImpl : public DB {
   Status Write(const WriteOptions& options, WriteBatch* updates) override;
   Status Get(const ReadOptions& options, const Slice& key,
              std::string* value) override;
+  Status Fetch(Slice addr, std::string* value);
+
   Iterator* NewIterator(const ReadOptions&) override;
   const Snapshot* GetSnapshot() override;
   void ReleaseSnapshot(const Snapshot* snapshot) override;
@@ -177,9 +183,13 @@ class DBImpl : public DB {
   MemTable* mem_;
   MemTable* imm_ GUARDED_BY(mutex_);  // Memtable being compacted
   std::atomic<bool> has_imm_;         // So bg thread can detect non-null imm_
-  WritableFile* logfile_;
-  uint64_t logfile_number_ GUARDED_BY(mutex_);
-  log::Writer* log_;
+  WritableFile* vlogfile_;
+  uint64_t vlogfile_number_ GUARDED_BY(mutex_);
+  vlog::VWriter* vlog_;
+  size_t vlog_head_;
+  vlog::VlogManager vlog_manager_;
+  static const int buffer_size_ = 409600;
+  char buffer_[buffer_size_] GUARDED_BY(mutex_);
   uint32_t seed_ GUARDED_BY(mutex_);  // For sampling.
 
   // Queue of writers.

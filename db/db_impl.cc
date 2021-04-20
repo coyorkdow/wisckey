@@ -4,14 +4,6 @@
 
 #include "db/db_impl.h"
 
-#include <algorithm>
-#include <atomic>
-#include <cstdint>
-#include <cstdio>
-#include <set>
-#include <string>
-#include <vector>
-
 #include "db/builder.h"
 #include "db/db_iter.h"
 #include "db/dbformat.h"
@@ -22,11 +14,20 @@
 #include "db/table_cache.h"
 #include "db/version_set.h"
 #include "db/write_batch_internal.h"
+#include <algorithm>
+#include <atomic>
+#include <cstdint>
+#include <cstdio>
+#include <set>
+#include <string>
+#include <vector>
+
 #include "leveldb/db.h"
 #include "leveldb/env.h"
 #include "leveldb/status.h"
 #include "leveldb/table.h"
 #include "leveldb/table_builder.h"
+
 #include "port/port.h"
 #include "table/block.h"
 #include "table/merger.h"
@@ -139,9 +140,11 @@ DBImpl::DBImpl(const Options& raw_options, const std::string& dbname)
       mem_(nullptr),
       imm_(nullptr),
       has_imm_(false),
-      logfile_(nullptr),
-      logfile_number_(0),
-      log_(nullptr),
+      vlogfile_(nullptr),
+      vlogfile_number_(0),
+      vlog_head_(0),
+      vlog_(nullptr),
+      vlog_manager_(options_.clean_threshold),
       seed_(0),
       tmp_batch_(new WriteBatch),
       background_compaction_scheduled_(false),
@@ -166,8 +169,8 @@ DBImpl::~DBImpl() {
   if (mem_ != nullptr) mem_->Unref();
   if (imm_ != nullptr) imm_->Unref();
   delete tmp_batch_;
-  delete log_;
-  delete logfile_;
+  delete vlog_;
+  delete vlogfile_;
   delete table_cache_;
 
   if (owns_info_log_) {
@@ -244,10 +247,10 @@ void DBImpl::RemoveObsoleteFiles() {
     if (ParseFileName(filename, &number, &type)) {
       bool keep = true;
       switch (type) {
-        case kLogFile:
-          keep = ((number >= versions_->LogNumber()) ||
-                  (number == versions_->PrevLogNumber()));
-          break;
+          //        case kLogFile:
+          //          keep = ((number >= versions_->LogNumber()) ||
+          //                  (number == versions_->PrevLogNumber()));
+          //          break;
         case kDescriptorFile:
           // Keep my manifest file, and any newer incarnations'
           // (in case there is a race that allows other incarnations)
@@ -264,6 +267,7 @@ void DBImpl::RemoveObsoleteFiles() {
         case kCurrentFile:
         case kDBLockFile:
         case kInfoLogFile:
+        case kLogFile:
           keep = true;
           break;
       }
@@ -349,8 +353,11 @@ Status DBImpl::Recover(VersionEdit* edit, bool* save_manifest) {
   for (size_t i = 0; i < filenames.size(); i++) {
     if (ParseFileName(filenames[i], &number, &type)) {
       expected.erase(number);
-      if (type == kLogFile && ((number >= min_log) || (number == prev_log)))
+      if (type == kLogFile && ((number >= min_log) || (number == prev_log))) {
         logs.push_back(number);
+        std::string vlog_name = LogFileName(dbname_, number);
+        vlog_manager_.AddVlog(dbname_, options_, number);
+      }
     }
   }
   if (!expected.empty()) {
@@ -362,6 +369,12 @@ Status DBImpl::Recover(VersionEdit* edit, bool* save_manifest) {
 
   // Recover in the order in which the logs were generated
   std::sort(logs.begin(), logs.end());
+  if (!logs.empty() && logs[0] == min_log) {
+    vlog_head_ = versions_->VlogHeadPos();
+  } else {
+    vlog_head_ = 0;
+  }
+
   for (size_t i = 0; i < logs.size(); i++) {
     s = RecoverLogFile(logs[i], (i == logs.size() - 1), save_manifest, edit,
                        &max_sequence);
@@ -382,10 +395,10 @@ Status DBImpl::Recover(VersionEdit* edit, bool* save_manifest) {
   return Status::OK();
 }
 
-Status DBImpl::RecoverLogFile(uint64_t log_number, bool last_log,
+Status DBImpl::RecoverLogFile(const uint64_t log_number, bool last_log,
                               bool* save_manifest, VersionEdit* edit,
                               SequenceNumber* max_sequence) {
-  struct LogReporter : public log::Reader::Reporter {
+  struct LogReporter : public vlog::VReader::Reporter {
     Env* env;
     Logger* info_log;
     const char* fname;
@@ -402,6 +415,7 @@ Status DBImpl::RecoverLogFile(uint64_t log_number, bool last_log,
 
   // Open the log file
   std::string fname = LogFileName(dbname_, log_number);
+  // file will be deleted during the deconstruction of VReader.
   SequentialFile* file;
   Status status = env_->NewSequentialFile(fname, &file);
   if (!status.ok()) {
@@ -419,7 +433,8 @@ Status DBImpl::RecoverLogFile(uint64_t log_number, bool last_log,
   // paranoid_checks==false so that corruptions cause entire commits
   // to be skipped instead of propagating bad information (like overly
   // large sequence numbers).
-  log::Reader reader(file, &reporter, true /*checksum*/, 0 /*initial_offset*/);
+  vlog::VReader reader(file, &reporter, true /*checksum*/,
+                       0 /*initial_offset*/);
   Log(options_.info_log, "Recovering log #%llu",
       (unsigned long long)log_number);
 
@@ -441,7 +456,9 @@ Status DBImpl::RecoverLogFile(uint64_t log_number, bool last_log,
       mem = new MemTable(internal_comparator_);
       mem->Ref();
     }
-    status = WriteBatchInternal::InsertInto(&batch, mem);
+    vlog_head_ += vlog::kVHeaderSize;
+    status = WriteBatchInternal::InsertAddressInto(&batch, log_number, mem,
+                                                   &vlog_head_);
     MaybeIgnoreError(&status);
     if (!status.ok()) {
       break;
@@ -466,32 +483,20 @@ Status DBImpl::RecoverLogFile(uint64_t log_number, bool last_log,
     }
   }
 
-  delete file;
-
-  // See if we should keep reusing the last log file.
-  if (status.ok() && options_.reuse_logs && last_log && compactions == 0) {
-    assert(logfile_ == nullptr);
-    assert(log_ == nullptr);
+  if (last_log) {
     assert(mem_ == nullptr);
-    uint64_t lfile_size;
-    if (env_->GetFileSize(fname, &lfile_size).ok() &&
-        env_->NewAppendableFile(fname, &logfile_).ok()) {
-      Log(options_.info_log, "Reusing old log %s \n", fname.c_str());
-      log_ = new log::Writer(logfile_, lfile_size);
-      logfile_number_ = log_number;
-      if (mem != nullptr) {
-        mem_ = mem;
-        mem = nullptr;
-      } else {
-        // mem can be nullptr if lognum exists but was empty.
-        mem_ = new MemTable(internal_comparator_);
-        mem_->Ref();
-      }
-    }
+    status = env_->NewAppendableFile(fname, &vlogfile_);
+    assert(status.ok());
+    vlog_ = new vlog::VWriter(vlogfile_);
+    vlog_manager_.SetCurrentVlog(log_number);
+    vlogfile_number_ = log_number;
+    mem_ = new MemTable(internal_comparator_);
+    mem_->Ref();
+  } else {
+    vlog_head_ = 0;
   }
 
   if (mem != nullptr) {
-    // mem did not get reused; compact it.
     if (status.ok()) {
       *save_manifest = true;
       status = WriteLevel0Table(mem, edit, nullptr);
@@ -564,7 +569,7 @@ void DBImpl::CompactMemTable() {
   // Replace immutable memtable with the generated Table
   if (s.ok()) {
     edit.SetPrevLogNumber(0);
-    edit.SetLogNumber(logfile_number_);  // Earlier logs no longer needed
+    edit.SetLogNumber(vlogfile_number_);  // Earlier logs no longer needed
     s = versions_->LogAndApply(&edit, &mutex_);
   }
 
@@ -1114,6 +1119,7 @@ int64_t DBImpl::TEST_MaxNextLevelOverlappingBytes() {
 
 Status DBImpl::Get(const ReadOptions& options, const Slice& key,
                    std::string* value) {
+  std::string addr;
   Status s;
   MutexLock l(&mutex_);
   SequenceNumber snapshot;
@@ -1139,12 +1145,12 @@ Status DBImpl::Get(const ReadOptions& options, const Slice& key,
     mutex_.Unlock();
     // First look in the memtable, then in the immutable memtable (if any).
     LookupKey lkey(key, snapshot);
-    if (mem->Get(lkey, value, &s)) {
+    if (mem->Get(lkey, &addr, &s)) {
       // Done
-    } else if (imm != nullptr && imm->Get(lkey, value, &s)) {
+    } else if (imm != nullptr && imm->Get(lkey, &addr, &s)) {
       // Done
     } else {
-      s = current->Get(options, lkey, value, &stats);
+      s = current->Get(options, lkey, &addr, &stats);
       have_stat_update = true;
     }
     mutex_.Lock();
@@ -1156,7 +1162,14 @@ Status DBImpl::Get(const ReadOptions& options, const Slice& key,
   mem->Unref();
   if (imm != nullptr) imm->Unref();
   current->Unref();
-  return s;
+  //  return s;
+
+  if (!s.ok()) return s;
+  return vlog_manager_.FetchValueFromVlog(addr, value);
+}
+
+Status DBImpl::Fetch(Slice addr, std::string* value) {
+  return vlog_manager_.FetchValueFromVlog(addr, value);
 }
 
 Iterator* DBImpl::NewIterator(const ReadOptions& options) {
@@ -1225,18 +1238,21 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
     // during this phase since &w is currently responsible for logging
     // and protects against concurrent loggers and concurrent writes
     // into mem_.
+    uint64_t vlog_file_number = vlogfile_number_;
     {
       mutex_.Unlock();
-      status = log_->AddRecord(WriteBatchInternal::Contents(write_batch));
+      status = vlog_->AddRecord(WriteBatchInternal::Contents(write_batch));
+      vlog_head_ += vlog::kVHeaderSize;
       bool sync_error = false;
       if (status.ok() && options.sync) {
-        status = logfile_->Sync();
+        status = vlogfile_->Sync();
         if (!status.ok()) {
           sync_error = true;
         }
       }
       if (status.ok()) {
-        status = WriteBatchInternal::InsertInto(write_batch, mem_);
+        status = WriteBatchInternal::InsertAddressInto(
+            write_batch, vlog_file_number, mem_, &vlog_head_);
       }
       mutex_.Lock();
       if (sync_error) {
@@ -1327,6 +1343,25 @@ Status DBImpl::MakeRoomForWrite(bool force) {
   assert(!writers_.empty());
   bool allow_delay = !force;
   Status s;
+  if (vlog_head_ >= options_.max_vlog_size) {
+    //新生成的vlog文件的编号会和imm生成的sst文件一起应用到version中，见CompactMemTable
+    uint32_t new_log_number = versions_->NewVlogNumber();
+    vlog_head_ = 0;
+    WritableFile* vlfile;
+    s = env_->NewWritableFile(LogFileName(dbname_, new_log_number), &vlfile);
+    if (!s.ok()) {
+      versions_->ReuseVlogNumber(new_log_number);
+      //           break;
+      return s;
+    }
+    delete vlog_;
+    delete vlogfile_;
+    vlogfile_ = vlfile;
+    vlogfile_number_ = new_log_number;
+    vlog_ = new vlog::VWriter(vlfile);
+    vlog_manager_.AddVlog(dbname_, options_, new_log_number);
+    Log(options_.info_log, "new vlog %d...\n", new_log_number);
+  }
   while (true) {
     if (!bg_error_.ok()) {
       // Yield previous error
@@ -1358,21 +1393,6 @@ Status DBImpl::MakeRoomForWrite(bool force) {
       Log(options_.info_log, "Too many L0 files; waiting...\n");
       background_work_finished_signal_.Wait();
     } else {
-      // Attempt to switch to a new memtable and trigger compaction of old
-      assert(versions_->PrevLogNumber() == 0);
-      uint64_t new_log_number = versions_->NewFileNumber();
-      WritableFile* lfile = nullptr;
-      s = env_->NewWritableFile(LogFileName(dbname_, new_log_number), &lfile);
-      if (!s.ok()) {
-        // Avoid chewing through file number space in a tight loop.
-        versions_->ReuseFileNumber(new_log_number);
-        break;
-      }
-      delete log_;
-      delete logfile_;
-      logfile_ = lfile;
-      logfile_number_ = new_log_number;
-      log_ = new log::Writer(lfile);
       imm_ = mem_;
       has_imm_.store(true, std::memory_order_release);
       mem_ = new MemTable(internal_comparator_);
@@ -1490,23 +1510,25 @@ Status DB::Open(const Options& options, const std::string& dbname, DB** dbptr) {
   bool save_manifest = false;
   Status s = impl->Recover(&edit, &save_manifest);
   if (s.ok() && impl->mem_ == nullptr) {
+    assert(impl->vlog_head_ == 0);
     // Create new log and a corresponding memtable.
-    uint64_t new_log_number = impl->versions_->NewFileNumber();
+    uint64_t new_log_number = impl->versions_->NewVlogNumber();
     WritableFile* lfile;
     s = options.env->NewWritableFile(LogFileName(dbname, new_log_number),
                                      &lfile);
     if (s.ok()) {
       edit.SetLogNumber(new_log_number);
-      impl->logfile_ = lfile;
-      impl->logfile_number_ = new_log_number;
-      impl->log_ = new log::Writer(lfile);
+      impl->vlogfile_ = lfile;
+      impl->vlogfile_number_ = new_log_number;
+      impl->vlog_ = new vlog::VWriter(lfile);
       impl->mem_ = new MemTable(impl->internal_comparator_);
       impl->mem_->Ref();
+      impl->vlog_manager_.AddVlog(dbname, options, new_log_number);
     }
   }
   if (s.ok() && save_manifest) {
     edit.SetPrevLogNumber(0);  // No older logs needed after recovery.
-    edit.SetLogNumber(impl->logfile_number_);
+    edit.SetLogNumber(impl->vlogfile_number_);
     s = impl->versions_->LogAndApply(&edit, &impl->mutex_);
   }
   if (s.ok()) {

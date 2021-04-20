@@ -4,16 +4,17 @@
 
 #include "db/version_set.h"
 
-#include <algorithm>
-#include <cstdio>
-
 #include "db/filename.h"
 #include "db/log_reader.h"
 #include "db/log_writer.h"
 #include "db/memtable.h"
 #include "db/table_cache.h"
+#include <algorithm>
+#include <cstdio>
+
 #include "leveldb/env.h"
 #include "leveldb/table_builder.h"
+
 #include "table/merger.h"
 #include "table/two_level_iterator.h"
 #include "util/coding.h"
@@ -743,6 +744,9 @@ VersionSet::VersionSet(const std::string& dbname, const Options* options,
       last_sequence_(0),
       log_number_(0),
       prev_log_number_(0),
+      head_info_(0),
+      tail_info_(0),
+      tail_vlog_number_(0),
       descriptor_file_(nullptr),
       descriptor_log_(nullptr),
       dummy_versions_(this),
@@ -893,10 +897,17 @@ Status VersionSet::Recover(bool* save_manifest) {
   bool have_prev_log_number = false;
   bool have_next_file = false;
   bool have_last_sequence = false;
+  bool have_head_info = false;
+  bool have_tail_info = false;
+  bool have_vlog_info = false;
   uint64_t next_file = 0;
   uint64_t last_sequence = 0;
   uint64_t log_number = 0;
   uint64_t prev_log_number = 0;
+  uint64_t head_info = 0;
+  uint64_t tail_info = 0;
+  uint64_t tail_vlog_number = 0;
+  std::string vlog_info;
   Builder builder(this, current_);
   int read_records = 0;
 
@@ -943,6 +954,22 @@ Status VersionSet::Recover(bool* save_manifest) {
         last_sequence = edit.last_sequence_;
         have_last_sequence = true;
       }
+
+      if (edit.has_head_info_) {
+        head_info = edit.head_info_;
+        have_head_info = true;
+      }
+
+      if (edit.has_tail_info_) {
+        tail_info = edit.tail_info_;
+        tail_vlog_number = edit.tail_vlog_number_;
+        have_tail_info = true;
+      }
+
+      if (edit.has_vlog_info_) {
+        vlog_info = edit.vlog_info_;
+        have_vlog_info = true;
+      }
     }
   }
   delete file;
@@ -977,6 +1004,10 @@ Status VersionSet::Recover(bool* save_manifest) {
     log_number_ = log_number;
     prev_log_number_ = prev_log_number;
 
+    head_info_ = head_info;
+    tail_info_ = tail_info;
+    tail_vlog_number_ = tail_vlog_number;
+    vlog_info_ = vlog_info;
     // See if we can reuse the existing MANIFEST file.
     if (ReuseManifest(dscname, current)) {
       // No need to save new manifest
