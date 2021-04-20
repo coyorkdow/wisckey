@@ -140,10 +140,8 @@ DBImpl::DBImpl(const Options& raw_options, const std::string& dbname)
       mem_(nullptr),
       imm_(nullptr),
       has_imm_(false),
-      vlogfile_(nullptr),
       vlogfile_number_(0),
       vlog_head_(0),
-      vlog_(nullptr),
       vlog_manager_(options_.clean_threshold),
       seed_(0),
       tmp_batch_(new WriteBatch),
@@ -169,8 +167,6 @@ DBImpl::~DBImpl() {
   if (mem_ != nullptr) mem_->Unref();
   if (imm_ != nullptr) imm_->Unref();
   delete tmp_batch_;
-  delete vlog_;
-  delete vlogfile_;
   delete table_cache_;
 
   if (owns_info_log_) {
@@ -482,12 +478,9 @@ Status DBImpl::RecoverLogFile(const uint64_t log_number, bool last_log,
       }
     }
   }
-
+  vlog_manager_.SetHead(vlog_head_);
   if (last_log) {
     assert(mem_ == nullptr);
-    status = env_->NewAppendableFile(fname, &vlogfile_);
-    assert(status.ok());
-    vlog_ = new vlog::VWriter(vlogfile_);
     vlog_manager_.SetCurrentVlog(log_number);
     vlogfile_number_ = log_number;
     mem_ = new MemTable(internal_comparator_);
@@ -1241,11 +1234,12 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
     uint64_t vlog_file_number = vlogfile_number_;
     {
       mutex_.Unlock();
-      status = vlog_->AddRecord(WriteBatchInternal::Contents(write_batch));
+      status =
+          vlog_manager_.AddRecord(WriteBatchInternal::Contents(write_batch));
       vlog_head_ += vlog::kVHeaderSize;
       bool sync_error = false;
       if (status.ok() && options.sync) {
-        status = vlogfile_->Sync();
+        status = vlog_manager_.Sync();
         if (!status.ok()) {
           sync_error = true;
         }
@@ -1347,18 +1341,8 @@ Status DBImpl::MakeRoomForWrite(bool force) {
     //新生成的vlog文件的编号会和imm生成的sst文件一起应用到version中，见CompactMemTable
     uint32_t new_log_number = versions_->NewVlogNumber();
     vlog_head_ = 0;
-    WritableFile* vlfile;
-    s = env_->NewWritableFile(LogFileName(dbname_, new_log_number), &vlfile);
-    if (!s.ok()) {
-      versions_->ReuseVlogNumber(new_log_number);
-      //           break;
-      return s;
-    }
-    delete vlog_;
-    delete vlogfile_;
-    vlogfile_ = vlfile;
+
     vlogfile_number_ = new_log_number;
-    vlog_ = new vlog::VWriter(vlfile);
     vlog_manager_.AddVlog(dbname_, options_, new_log_number);
     Log(options_.info_log, "new vlog %d...\n", new_log_number);
   }
@@ -1513,18 +1497,11 @@ Status DB::Open(const Options& options, const std::string& dbname, DB** dbptr) {
     assert(impl->vlog_head_ == 0);
     // Create new log and a corresponding memtable.
     uint64_t new_log_number = impl->versions_->NewVlogNumber();
-    WritableFile* lfile;
-    s = options.env->NewWritableFile(LogFileName(dbname, new_log_number),
-                                     &lfile);
-    if (s.ok()) {
-      edit.SetLogNumber(new_log_number);
-      impl->vlogfile_ = lfile;
-      impl->vlogfile_number_ = new_log_number;
-      impl->vlog_ = new vlog::VWriter(lfile);
-      impl->mem_ = new MemTable(impl->internal_comparator_);
-      impl->mem_->Ref();
-      impl->vlog_manager_.AddVlog(dbname, options, new_log_number);
-    }
+    edit.SetLogNumber(new_log_number);
+    impl->vlogfile_number_ = new_log_number;
+    impl->mem_ = new MemTable(impl->internal_comparator_);
+    impl->mem_->Ref();
+    impl->vlog_manager_.AddVlog(dbname, options, new_log_number);
   }
   if (s.ok() && save_manifest) {
     edit.SetPrevLogNumber(0);  // No older logs needed after recovery.

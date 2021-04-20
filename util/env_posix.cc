@@ -298,6 +298,10 @@ class PosixWritableFile final : public WritableFile {
     return WriteUnbuffered(write_data, write_size);
   }
 
+  Status SyncedAppend(const Slice& data) override {
+    return WriteUnbuffered(data.data(), data.size());
+  }
+
   Status Close() override {
     Status status = FlushBuffer();
     const int close_result = ::close(fd_);

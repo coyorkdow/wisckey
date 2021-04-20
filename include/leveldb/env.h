@@ -298,6 +298,11 @@ class LEVELDB_EXPORT WritableFile {
   virtual Status Close() = 0;
   virtual Status Flush() = 0;
   virtual Status Sync() = 0;
+
+  virtual Status SyncedAppend(const Slice& data) {
+    (void)data;
+    return Status::NotSupported("SyncedAppend");
+  }
 };
 
 // An interface for writing log messages.

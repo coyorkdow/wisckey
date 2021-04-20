@@ -183,9 +183,7 @@ class DBImpl : public DB {
   MemTable* mem_;
   MemTable* imm_ GUARDED_BY(mutex_);  // Memtable being compacted
   std::atomic<bool> has_imm_;         // So bg thread can detect non-null imm_
-  WritableFile* vlogfile_;
   uint64_t vlogfile_number_ GUARDED_BY(mutex_);
-  vlog::VWriter* vlog_;
   size_t vlog_head_;
   vlog::VlogManager vlog_manager_;
   static const int buffer_size_ = 409600;

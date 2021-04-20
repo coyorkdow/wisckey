@@ -3,6 +3,7 @@
 #define STORAGE_LEVELDB_DB_VLOG_CACHE_H_
 
 #include "db/dbformat.h"
+#include "db/vlog_manager.h"
 #include <cstdint>
 #include <leveldb/env.h>
 #include <list>
@@ -15,10 +16,15 @@
 
 #include "port/port.h"
 
+#include "vlog_manager.h"
+
 namespace leveldb {
 namespace vlog {
 
-class VlogCache {
+class VlogInfo;
+class VlogManager;
+
+class VlogFetcher {
   class Cache {
    public:
     static const size_t MaxCacheSize = 64 - 2 - 1;
@@ -57,15 +63,20 @@ class VlogCache {
   };
 
  public:
-  VlogCache(const std::string& dbname, const Options& options,
-            uint32_t log_number, int entries);
+  VlogFetcher(const std::string& dbname, const Options& options,
+              uint32_t log_number, int entries);
 
-  ~VlogCache();
+  ~VlogFetcher();
 
   Status Get(uint64_t offset, uint64_t size, std::string* value);
 
+  friend class VlogManager;
+  ;
+
  private:
-  SequentialFile* file_ GUARDED_BY(mutex_);
+  VlogInfo* my_info_;
+
+  SequentialFile* file_;
   Cache cache_;
 
   port::Mutex mutex_;
