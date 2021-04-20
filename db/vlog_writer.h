@@ -5,15 +5,18 @@
 #ifndef STORAGE_LEVELDB_DB_VLOG_WRITER_H_
 #define STORAGE_LEVELDB_DB_VLOG_WRITER_H_
 
+#include "db/log_format.h"
+#include "db/vlog_manager.h"
 #include <cstdint>
 
-#include "db/log_format.h"
 #include "leveldb/slice.h"
 #include "leveldb/status.h"
 
 namespace leveldb {
 
 class WritableFile;
+class VlogInfo;
+class VlogManager;
 
 namespace vlog {
 
@@ -28,7 +31,12 @@ class VWriter {
 
   Status AddRecord(const Slice& slice);
 
+  friend class VlogManager;
+
  private:
+  VWriter() = default;
+
+  VlogInfo* my_info_;
   WritableFile* dest_;
   // No copying allowed
   VWriter(const VWriter&);
@@ -38,4 +46,4 @@ class VWriter {
 }  // namespace vlog
 }  // namespace leveldb
 
-#endif  // STORAGE_LEVELDB_DB_LOG_WRITER_H_
+#endif  // STORAGE_LEVELDB_DB_VLOG_WRITER_H_

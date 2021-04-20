@@ -5,102 +5,48 @@
 
 #include "util/coding.h"
 
+#include "filename.h"
+
 namespace leveldb {
 namespace vlog {
 
 VlogManager::VlogManager(uint64_t clean_threshold)
-    : clean_threshold_(clean_threshold), now_vlog_(0) {}
+    : clean_threshold_(clean_threshold), cur_vlog_(0) {}
 
 VlogManager::~VlogManager() {
   for (auto& it : manager_) {
-    delete it.second.vlog_cache_;
+    if (it.first == cur_vlog_) {
+      it.second->vlog_write_->dest_->SyncedAppend(
+          Slice(it.second->buffer_, it.second->size_));
+    }
+    delete it.second->vlog_fetch_;
+    delete it.second->vlog_write_->dest_;
+    delete it.second->vlog_write_;
+    delete it.second;
   }
 }
 
 void VlogManager::AddVlog(const std::string& dbname, const Options& options,
                           uint64_t vlog_numb) {
-  VlogInfo v;
-  v.vlog_cache_ = new VlogCache(dbname, options, vlog_numb, 1 << 16);
-  v.count_ = 0;
+  VlogInfo* old = manager_[vlog_numb];
+  if (old != nullptr) {
+    old->vlog_write_->dest_->SyncedAppend(Slice(old->buffer_, old->size_));
+  }
+  VlogInfo* v = new VlogInfo;
+  v->vlog_write_ = new VWriter;
+  Status s = options.env->NewAppendableFile(LogFileName(dbname, vlog_numb),
+                                            &v->vlog_write_->dest_);
+  assert(s.ok());
+  // VlogFetcher must initialize after WritableFile is created;
+  v->vlog_fetch_ = new VlogFetcher(dbname, options, vlog_numb, 1 << 16);
+  v->vlog_write_->my_info_ = v;
+  v->vlog_fetch_->my_info_ = v;
+  v->count_ = 0;
   manager_[vlog_numb] = v;
-  now_vlog_ = vlog_numb;
+  cur_vlog_ = vlog_numb;
 }
 
-void VlogManager::SetCurrentVlog(uint64_t vlog_numb) { now_vlog_ = vlog_numb; }
-
-//与GetVlogsToClean对应
-void VlogManager::RemoveCleaningVlog(uint64_t vlog_numb) {
-  std::map<uint64_t, VlogInfo>::const_iterator iter = manager_.find(vlog_numb);
-  manager_.erase(iter);
-  cleaning_vlog_set_.erase(vlog_numb);
-}
-
-void VlogManager::AddDropCount(uint64_t vlog_numb) {
-  std::map<uint64_t, VlogInfo>::iterator iter = manager_.find(vlog_numb);
-  if (iter != manager_.end()) {
-    iter->second.count_++;
-    if (iter->second.count_ >= clean_threshold_ && vlog_numb != now_vlog_) {
-      cleaning_vlog_set_.insert(vlog_numb);
-    }
-  }  //否则说明该vlog已经clean过了
-}
-
-std::set<uint64_t> VlogManager::GetVlogsToClean(uint64_t clean_threshold) {
-  std::set<uint64_t> res;
-  for (auto& it : manager_) {
-    if (it.second.count_ >= clean_threshold && it.first != now_vlog_)
-      res.insert(it.first);
-  }
-  return res;
-}
-
-uint64_t VlogManager::GetVlogToClean() {
-  std::set<uint64_t>::iterator iter = cleaning_vlog_set_.begin();
-  assert(iter != cleaning_vlog_set_.end());
-  return *iter;
-}
-
-bool VlogManager::HasVlogToClean() { return !cleaning_vlog_set_.empty(); }
-
-bool VlogManager::Encode(std::string& val) {
-  val.clear();
-  uint64_t size = manager_.size();
-  if (size == 0) return false;
-  char buf[8];
-  for (auto& it : manager_) {
-    EncodeFixed64(buf, (it.second.count_ << 16) | it.first);
-    val.append(buf, 8);
-  }
-  return true;
-}
-
-bool VlogManager::Decode(std::string& val) {
-  Slice input(val);
-  while (!input.empty()) {
-    uint64_t code = DecodeFixed64(input.data());
-    uint64_t file_numb = code & 0xffff;
-    size_t count = code >> 16;
-    //检查manager_现在是否还有该vlog，因为有可能已经删除了
-    if (manager_.count(file_numb) > 0) {
-      manager_[file_numb].count_ = count;
-      if (count >= clean_threshold_ && file_numb != now_vlog_) {
-        cleaning_vlog_set_.insert(file_numb);
-      }
-    }
-    input.remove_prefix(8);
-  }
-  return true;
-}
-
-bool VlogManager::NeedRecover(uint64_t vlog_numb) {
-  std::map<uint64_t, VlogInfo>::iterator iter = manager_.find(vlog_numb);
-  if (iter != manager_.end()) {
-    assert(iter->second.count_ >= clean_threshold_);
-    return true;
-  } else {
-    return false;  //不需要recoverclean,即没有清理一半的vlog
-  }
-}
+void VlogManager::SetCurrentVlog(uint64_t vlog_numb) { cur_vlog_ = vlog_numb; }
 
 Status VlogManager::FetchValueFromVlog(Slice addr, std::string* value) {
   Status s;
@@ -113,15 +59,37 @@ Status VlogManager::FetchValueFromVlog(Slice addr, std::string* value) {
   if (!GetVarint64(&addr, &size))
     return Status::Corruption("parse pos false in RealValue");
 
-  std::map<uint64_t, VlogInfo>::const_iterator iter = manager_.find(file_numb);
-  if (iter == manager_.end() || iter->second.vlog_cache_ == nullptr) {
+  std::map<uint64_t, VlogInfo*>::const_iterator iter = manager_.find(file_numb);
+  if (iter == manager_.end() || iter->second->vlog_fetch_ == nullptr) {
     s = Status::Corruption("can not find vlog");
   } else {
-    VlogCache* cache = iter->second.vlog_cache_;
+    VlogFetcher* cache = iter->second->vlog_fetch_;
     s = cache->Get(offset, size, value);
   }
 
   return s;
+}
+Status VlogManager::AddRecord(const Slice& slice) {
+  std::map<uint64_t, VlogInfo*>::const_iterator iter = manager_.find(cur_vlog_);
+  assert(iter != manager_.end());
+  assert(iter->second != nullptr);
+  return iter->second->vlog_write_->AddRecord(slice);
+}
+Status VlogManager::Sync() {
+  std::map<uint64_t, VlogInfo*>::const_iterator iter = manager_.find(cur_vlog_);
+  assert(iter != manager_.end());
+  assert(iter->second != nullptr);
+  return iter->second->vlog_write_->dest_->Sync();
+}
+
+Status VlogManager::SetHead(size_t offset) {
+  std::map<uint64_t, VlogInfo*>::const_iterator iter = manager_.find(cur_vlog_);
+  if (iter == manager_.end() || iter->second->vlog_fetch_ == nullptr) {
+    return Status::Corruption("can not find vlog");
+  } else {
+    iter->second->head_ = offset;
+    return Status::OK();
+  }
 }
 
 }  // namespace vlog

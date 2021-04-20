@@ -151,6 +151,13 @@ class SpecialEnv : public EnvWrapper {
           return base_->Append(data);
         }
       }
+      Status SyncedAppend(const Slice& data) {
+        Status s;
+        if ((s = Append(data)).ok())
+          return Flush();
+        else
+          return s;
+      }
       Status Close() { return base_->Close(); }
       Status Flush() { return base_->Flush(); }
       Status Sync() {
@@ -221,6 +228,13 @@ class SpecialEnv : public EnvWrapper {
         } else {
           return base_->Append(data);
         }
+      }
+      Status SyncedAppend(const Slice& data) {
+        Status s;
+        if ((s = Append(data)).ok())
+          return Flush();
+        else
+          return s;
       }
       Status Close() { return base_->Close(); }
       Status Flush() { return base_->Flush(); }

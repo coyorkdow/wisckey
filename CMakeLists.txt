@@ -144,8 +144,8 @@ target_sources(leveldb
     "db/vlog_reader.h"
     "db/vlog_writer.cc"
     "db/vlog_writer.h"
-    "db/vlog_cache.h"
-    "db/vlog_cache.cc"
+    "db/vlog_fetcher.h"
+    "db/vlog_fetcher.cc"
 
     "db/memtable.cc"
     "db/memtable.h"

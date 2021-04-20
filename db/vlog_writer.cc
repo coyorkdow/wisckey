@@ -21,26 +21,40 @@ VWriter::VWriter(WritableFile* dest) : dest_(dest) {}
 
 VWriter::~VWriter() = default;
 
-
 Status VWriter::AddRecord(const Slice& slice) {
   const char* ptr = slice.data();
   size_t left = slice.size();
-  char buf[kVHeaderSize];
+  char head[kVHeaderSize];
   uint32_t crc = crc32c::Extend(0, ptr, left);
   crc = crc32c::Mask(crc);  // Adjust for storage
-  EncodeFixed32(buf, crc);
-  EncodeFixed64(&buf[4], left);
-  Status s = dest_->Append(Slice(buf, kVHeaderSize));
-  assert(s.ok());
-  if (s.ok()) {
-    //    std::string t;
-    //    t.push_back(static_cast<char>(kTypeDeletion));
-    //    dest_->Append(t);
-    s = dest_->Append(Slice(ptr, left));
-    assert(s.ok());
-    if (s.ok()) {
-      s = dest_->Flush();
+  EncodeFixed32(head, crc);
+  EncodeFixed64(&head[4], left);
+
+  Status s;
+
+  if (my_info_->size_ + kVHeaderSize + left > WriteBufferSize) {
+    MutexLock l(&my_info_->mutex_);
+    if (!(s = dest_->SyncedAppend(Slice(my_info_->buffer_, my_info_->size_)))
+             .ok()) {
+      return s;
     }
+    my_info_->head_ += my_info_->size_;
+    my_info_->size_ = 0;
+  }
+
+  if (my_info_->size_ + kVHeaderSize + left > WriteBufferSize) {
+    assert(my_info_->size_ == 0);
+    s = dest_->SyncedAppend(Slice(head, kVHeaderSize));
+    my_info_->head_ += kVHeaderSize;
+    if (s.ok()) {
+      s = dest_->SyncedAppend(Slice(ptr, left));
+      my_info_->head_ += left;
+    }
+  } else {
+    memcpy(my_info_->buffer_ + my_info_->size_, head, kVHeaderSize);
+    my_info_->size_ += kVHeaderSize;
+    memcpy(my_info_->buffer_ + my_info_->size_, ptr, left);
+    my_info_->size_ += left;
   }
   return s;
 }
