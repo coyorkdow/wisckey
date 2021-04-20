@@ -10,7 +10,6 @@ namespace vlog {
 
 Status VlogFetcher::Get(const uint64_t offset, const uint64_t size,
                         std::string* value) {
-  MutexLock l(&mutex_);
   const char* scratch;
   size_t len;
   Slice result;
@@ -23,6 +22,8 @@ Status VlogFetcher::Get(const uint64_t offset, const uint64_t size,
   //  } else {
   char buf[1 << 16];
   bool need_deallocate = false;
+
+  my_info_->mutex_.Lock();
   if (offset >= my_info_->head_) {
     assert(offset - my_info_->head_ < my_info_->size_);
     scratch = &my_info_->buffer_[offset - my_info_->head_];
@@ -37,6 +38,8 @@ Status VlogFetcher::Get(const uint64_t offset, const uint64_t size,
     file_->Jump(offset);
     s = file_->Read(size, &result, const_cast<char*>(scratch));
   }
+  my_info_->mutex_.Unlock();
+
   Slice k, v;
   assert(result[0] == kTypeValue);
   result.remove_prefix(1);

@@ -77,9 +77,6 @@ class VlogFetcher {
   VlogInfo* my_info_;
 
   SequentialFile* file_;
-  Cache cache_;
-
-  port::Mutex mutex_;
 };
 }  // namespace vlog
 }  // namespace leveldb

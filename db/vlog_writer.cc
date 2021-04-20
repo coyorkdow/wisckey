@@ -33,6 +33,7 @@ Status VWriter::AddRecord(const Slice& slice) {
   Status s;
 
   if (my_info_->size_ + kVHeaderSize + left > WriteBufferSize) {
+    MutexLock l(&my_info_->mutex_);
     if (!(s = dest_->SyncedAppend(Slice(my_info_->buffer_, my_info_->size_)))
              .ok()) {
       return s;

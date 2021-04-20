@@ -26,6 +26,8 @@ class VlogInfo {
 
   uint64_t count_;  //代表该vlog文件垃圾kv的数量
 
+  port::Mutex mutex_;
+
  public:
   VlogInfo() : size_(0), head_(0) {}
 
