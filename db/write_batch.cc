@@ -81,6 +81,36 @@ Status WriteBatch::Iterate(Handler* handler) const {
   }
 }
 
+Status WriteBatch::ReadRecord(uint64_t *offset, Slice* key, Slice* value,
+                              bool* is_del) {
+  Slice input(rep_);
+  input.remove_prefix(*offset);
+  const char* begin_pos = input.data();
+  char tag = input[0];
+  input.remove_prefix(1);
+  switch (tag) {
+    case kTypeValue: {
+      if (!(GetLengthPrefixedSlice(&input, key) &&
+            GetLengthPrefixedSlice(&input, value))) {
+        return Status::Corruption("bad WriteBatch Put");
+      }
+      *is_del = false;
+      break;
+    }
+    case kTypeDeletion: {
+      if (!GetLengthPrefixedSlice(&input, key)) {
+        return Status::Corruption("bad WriteBatch Delete");
+      }
+      *is_del = true;
+      break;
+    }
+    default:
+      return Status::Corruption("unknown WriteBatch tag");
+  }
+  *offset += (input.data() - begin_pos);
+  return Status::OK();
+}
+
 Status WriteBatch::Iterate(Handler* handler, const uint64_t vlog_number,
                            size_t* vlog_head) const {
   Slice input(rep_);

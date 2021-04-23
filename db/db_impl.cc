@@ -141,7 +141,9 @@ DBImpl::DBImpl(const Options& raw_options, const std::string& dbname)
       imm_(nullptr),
       has_imm_(false),
       vlogfile_number_(0),
+      vlog_head_file_number_(0),
       vlog_head_(0),
+      vlog_head_checkpoint_(0),
       vlog_manager_(options_.clean_threshold),
       seed_(0),
       tmp_batch_(new WriteBatch),
@@ -562,7 +564,9 @@ void DBImpl::CompactMemTable() {
   // Replace immutable memtable with the generated Table
   if (s.ok()) {
     edit.SetPrevLogNumber(0);
-    edit.SetLogNumber(vlogfile_number_);  // Earlier logs no longer needed
+    // Recovery will starts from this vlog.
+    edit.SetLogNumber(vlog_head_file_number_);
+    edit.SetVlogHeadPos(vlog_head_checkpoint_);
     s = versions_->LogAndApply(&edit, &mutex_);
   }
 
@@ -1113,8 +1117,14 @@ int64_t DBImpl::TEST_MaxNextLevelOverlappingBytes() {
 Status DBImpl::Get(const ReadOptions& options, const Slice& key,
                    std::string* value) {
   std::string addr;
-  Status s;
+  Status s = GetAddr(options, key, &addr);
+  if (!s.ok()) return s;
+  return vlog_manager_.FetchValueFromVlog(addr, value);
+}
+
+Status DBImpl::GetAddr(const ReadOptions& options, const Slice& key, std::string* addr) {
   MutexLock l(&mutex_);
+  Status s;
   SequenceNumber snapshot;
   if (options.snapshot != nullptr) {
     snapshot =
@@ -1138,12 +1148,12 @@ Status DBImpl::Get(const ReadOptions& options, const Slice& key,
     mutex_.Unlock();
     // First look in the memtable, then in the immutable memtable (if any).
     LookupKey lkey(key, snapshot);
-    if (mem->Get(lkey, &addr, &s)) {
+    if (mem->Get(lkey, addr, &s)) {
       // Done
-    } else if (imm != nullptr && imm->Get(lkey, &addr, &s)) {
+    } else if (imm != nullptr && imm->Get(lkey, addr, &s)) {
       // Done
     } else {
-      s = current->Get(options, lkey, &addr, &stats);
+      s = current->Get(options, lkey, addr, &stats);
       have_stat_update = true;
     }
     mutex_.Lock();
@@ -1155,10 +1165,7 @@ Status DBImpl::Get(const ReadOptions& options, const Slice& key,
   mem->Unref();
   if (imm != nullptr) imm->Unref();
   current->Unref();
-  //  return s;
-
-  if (!s.ok()) return s;
-  return vlog_manager_.FetchValueFromVlog(addr, value);
+  return s;
 }
 
 Status DBImpl::Fetch(Slice addr, std::string* value) {
@@ -1338,10 +1345,8 @@ Status DBImpl::MakeRoomForWrite(bool force) {
   bool allow_delay = !force;
   Status s;
   if (vlog_head_ >= options_.max_vlog_size) {
-    //新生成的vlog文件的编号会和imm生成的sst文件一起应用到version中，见CompactMemTable
     uint32_t new_log_number = versions_->NewVlogNumber();
     vlog_head_ = 0;
-
     vlogfile_number_ = new_log_number;
     vlog_manager_.AddVlog(dbname_, options_, new_log_number);
     Log(options_.info_log, "new vlog %d...\n", new_log_number);
@@ -1381,6 +1386,8 @@ Status DBImpl::MakeRoomForWrite(bool force) {
       has_imm_.store(true, std::memory_order_release);
       mem_ = new MemTable(internal_comparator_);
       mem_->Ref();
+      vlog_head_checkpoint_ = vlog_head_;
+      vlog_head_file_number_ = vlogfile_number_;
       force = false;  // Do not force another compaction if have room
       MaybeScheduleCompaction();
     }

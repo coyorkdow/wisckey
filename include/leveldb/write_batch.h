@@ -75,7 +75,9 @@ class LEVELDB_EXPORT WriteBatch {
   // the only difference between WriteBatch::Iterate is that Iterate only
   // put the address of the value in the vlog file into the LSM-tree.
   Status Iterate(Handler* handler, const uint64_t vlog_number,
-                     size_t* vlog_head) const;
+                 size_t* vlog_head) const;
+
+  Status ReadRecord(uint64_t *offset, Slice* key, Slice* value, bool* is_del);
 
  private:
   friend class WriteBatchInternal;
