@@ -1122,7 +1122,8 @@ Status DBImpl::Get(const ReadOptions& options, const Slice& key,
   return vlog_manager_.FetchValueFromVlog(addr, value);
 }
 
-Status DBImpl::GetAddr(const ReadOptions& options, const Slice& key, std::string* addr) {
+Status DBImpl::GetAddr(const ReadOptions& options, const Slice& key,
+                       std::string* addr) {
   MutexLock l(&mutex_);
   Status s;
   SequenceNumber snapshot;
@@ -1473,6 +1474,113 @@ void DBImpl::GetApproximateSizes(const Range* range, int n, uint64_t* sizes) {
   }
 
   v->Unref();
+}
+
+void DBImpl::CleanVlog(const uint64_t vlog_number) {
+  struct LogReporter : public vlog::VReader::Reporter {
+    Env* env;
+    Logger* info_log;
+    const char* fname;
+    Status* status;  // null if options_.paranoid_checks==false
+    void Corruption(size_t bytes, const Status& s) override {
+      Log(info_log, "%s%s: dropping %d bytes; %s",
+          (this->status == nullptr ? "(ignoring error) " : ""), fname,
+          static_cast<int>(bytes), s.ToString().c_str());
+      if (this->status != nullptr && this->status->ok()) *this->status = s;
+    }
+  };
+
+#define ParseAddr(addr, file_numb, offset, size) \
+  do {                                           \
+    GetVarint64(&addr, &file_numb);              \
+    GetVarint64(&addr, &offset);                 \
+    GetVarint64(&addr, &size);                   \
+  } while (0)
+
+  mutex_.AssertHeld();
+  SequenceNumber smallest_snapshot;
+  Snapshot* oldest = nullptr;
+  if (snapshots_.empty()) {
+    smallest_snapshot = versions_->LastSequence();
+  } else {
+    oldest = snapshots_.oldest();
+    smallest_snapshot = snapshots_.oldest()->sequence_number();
+  }
+  mutex_.Unlock();
+
+  // Open the vlog file
+  std::string fname = LogFileName(dbname_, vlog_number);
+  // file will be deleted after complete cleaning.
+  SequentialFile* file;
+  Status status = env_->NewSequentialFile(fname, &file);
+  if (!status.ok()) {
+  }
+
+  LogReporter reporter;
+  reporter.env = env_;
+  reporter.info_log = options_.info_log;
+  reporter.fname = fname.c_str();
+  reporter.status = (options_.paranoid_checks ? &status : nullptr);
+  vlog::VReader reader(file, &reporter, true /*checksum*/,
+                       0 /*initial_offset*/);
+
+  Slice key, value;
+  Slice record;
+  std::string scratch;
+  std::string addr;
+
+  WriteBatch batch, valid_record_batch;
+
+  ReadOptions read_options;
+  WriteOptions write_options;
+
+  while (reader.ReadRecord(&record, &scratch) && status.ok()) {
+    if (record.size() < 12) {
+      reporter.Corruption(record.size(),
+                          Status::Corruption("log record too small"));
+      continue;
+    }
+    WriteBatchInternal::SetContents(&batch, record);
+    SequenceNumber log_seq = WriteBatchInternal::Sequence(&batch);
+    size_t head = vlog::kVHeaderSize;
+    bool is_del = false;
+    while (head < record.size()) {
+      status =
+          WriteBatchInternal::ReadRecord(&batch, &head, &key, &value, &is_del);
+      if (!status.ok()) {
+      }
+      if (!is_del && GetAddr(read_options, key, &addr).ok()) {
+        Slice addr_(addr);
+        uint64_t file_numb, offset, size;
+        // address is <vlog_number, vlog_offset, size>
+        ParseAddr(addr_, file_numb, offset, size);
+        if (offset + size == head && file_numb == vlog_number) {
+          valid_record_batch.Put(key, value);
+        } else if (oldest != nullptr && log_seq <= smallest_snapshot) {
+          read_options.snapshot = oldest;
+          if (GetAddr(read_options, key, &addr).ok()) {
+            addr_ = Slice(addr);
+            ParseAddr(addr_, file_numb, offset, size);
+            if (offset + size == head && file_numb == vlog_number) {
+              valid_record_batch.Put(key, value);
+            }
+          }
+        }
+      }
+      if (WriteBatchInternal::ByteSize(&valid_record_batch) >
+          options_.clean_write_buffer_size) {
+        status = Write(write_options, &valid_record_batch);
+        valid_record_batch.Clear();
+      }
+    }
+  }
+
+  if (WriteBatchInternal::Count(&valid_record_batch) > 0) {
+    status = Write(write_options, &valid_record_batch);
+    valid_record_batch.Clear();
+  }
+
+#undef ParseAddr
 }
 
 // Default implementations of convenience methods that subclasses of DB

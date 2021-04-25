@@ -159,6 +159,8 @@ class DBImpl : public DB {
   Status InstallCompactionResults(CompactionState* compact)
       EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
+  void CleanVlog(uint64_t vlog_number);
+
   const Comparator* user_comparator() const {
     return internal_comparator_.user_comparator();
   }

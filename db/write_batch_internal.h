@@ -39,7 +39,10 @@ class WriteBatchInternal {
   static Status InsertInto(const WriteBatch* batch, MemTable* memtable);
 
   static Status InsertAddressInto(const WriteBatch* batch, uint64_t vlog_number,
-                               MemTable* memTable, size_t* vlog_head);
+                                  MemTable* memTable, size_t* vlog_head);
+
+  static Status ReadRecord(WriteBatch* batch, size_t* offset, Slice* key,
+                           Slice* value, bool* is_del);
 
   static void Append(WriteBatch* dst, const WriteBatch* src);
 };

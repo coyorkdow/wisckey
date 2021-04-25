@@ -81,9 +81,10 @@ Status WriteBatch::Iterate(Handler* handler) const {
   }
 }
 
-Status WriteBatch::ReadRecord(uint64_t *offset, Slice* key, Slice* value,
+Status WriteBatch::ReadRecord(size_t* offset, Slice* key, Slice* value,
                               bool* is_del) {
   Slice input(rep_);
+  assert(*offset >= kHeader);
   input.remove_prefix(*offset);
   const char* begin_pos = input.data();
   char tag = input[0];
@@ -140,11 +141,12 @@ Status WriteBatch::Iterate(Handler* handler, const uint64_t vlog_number,
           PutVarint64(&address, size);
           handler->Put(key, address);
 
-//          std::fprintf(stdout,
-//                       "write: file_numb is %llu, pos is %zu, size is %zu, key "
-//                       "is %s, val is %s\n",
-//                       vlog_number, *vlog_head, size, key.data(), value.data());
-//          fflush(stdout);
+          //          std::fprintf(stdout,
+          //                       "write: file_numb is %llu, pos is %zu, size
+          //                       is %zu, key " "is %s, val is %s\n",
+          //                       vlog_number, *vlog_head, size, key.data(),
+          //                       value.data());
+          //          fflush(stdout);
 
           last_pos = input.data();
           *vlog_head += size;
@@ -248,6 +250,11 @@ Status WriteBatchInternal::InsertAddressInto(const WriteBatch* batch,
   inserter.sequence_ = WriteBatchInternal::Sequence(batch);
   inserter.mem_ = memTable;
   return batch->Iterate(&inserter, vlog_number, vlog_head);
+}
+
+Status WriteBatchInternal::ReadRecord(WriteBatch* batch, size_t* offset,
+                                      Slice* key, Slice* value, bool* is_del) {
+  return batch->ReadRecord(offset, key, value, is_del);
 }
 
 }  // namespace leveldb

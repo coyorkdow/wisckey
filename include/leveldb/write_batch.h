@@ -77,7 +77,7 @@ class LEVELDB_EXPORT WriteBatch {
   Status Iterate(Handler* handler, const uint64_t vlog_number,
                  size_t* vlog_head) const;
 
-  Status ReadRecord(uint64_t *offset, Slice* key, Slice* value, bool* is_del);
+  Status ReadRecord(size_t* offset, Slice* key, Slice* value, bool* is_del);
 
  private:
   friend class WriteBatchInternal;
