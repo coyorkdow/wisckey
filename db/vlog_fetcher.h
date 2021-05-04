@@ -76,7 +76,7 @@ class VlogFetcher {
  private:
   VlogInfo* my_info_;
 
-  SequentialFile* file_;
+  RandomAccessFile* file_;
 };
 }  // namespace vlog
 }  // namespace leveldb

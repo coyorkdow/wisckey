@@ -262,6 +262,12 @@ class SpecialEnv : public EnvWrapper {
     return s;
   }
 
+  Status NewNonMmapRandomAccessFile(const std::string& filename,
+                                    RandomAccessFile** result) {
+    Status s = target()->NewNonMmapRandomAccessFile(filename, result);
+    return s;
+  }
+
   Status NewRandomAccessFile(const std::string& f, RandomAccessFile** r) {
     class CountingFile : public RandomAccessFile {
      private:

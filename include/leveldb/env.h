@@ -85,6 +85,13 @@ class LEVELDB_EXPORT Env {
   virtual Status NewRandomAccessFile(const std::string& fname,
                                      RandomAccessFile** result) = 0;
 
+  virtual Status NewNonMmapRandomAccessFile(const std::string& filename,
+                                            RandomAccessFile** result) {
+    (void)filename;
+    (void)result;
+    return Status::NotSupported("NewNonMmapRandomAccessFile");
+  }
+
   // Create an object that writes to a new file with the specified
   // name.  Deletes any existing file with the same name and creates a
   // new file.  On success, stores a pointer to the new file in

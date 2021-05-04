@@ -22,23 +22,30 @@ Status VlogFetcher::Get(const uint64_t offset, const uint64_t size,
   //  } else {
   char buf[1 << 16];
   bool need_deallocate = false;
+  bool in_buffer = false;
+  bool locked = false;
 
-  my_info_->mutex_.Lock();
+  while (!my_info_->critical_is_locked.compare_exchange_weak(
+      locked, true, std::memory_order_acq_rel)) {
+    locked = false;
+  }
   if (offset >= my_info_->head_) {
     assert(offset - my_info_->head_ < my_info_->size_);
     scratch = &my_info_->buffer_[offset - my_info_->head_];
     result = Slice(scratch, size);
-  } else {
+    in_buffer = true;
+  }
+  my_info_->critical_is_locked.store(false, std::memory_order_release);
+
+  if (!in_buffer) {
     if (size <= (1 << 16)) {
       scratch = buf;
     } else {
       scratch = new char[size];
       need_deallocate = true;
     }
-    file_->Jump(offset);
-    s = file_->Read(size, &result, const_cast<char*>(scratch));
+    s = file_->Read(offset, size, &result, const_cast<char*>(scratch));
   }
-  my_info_->mutex_.Unlock();
 
   Slice k, v;
   assert(result[0] == kTypeValue);
@@ -62,8 +69,8 @@ Status VlogFetcher::Get(const uint64_t offset, const uint64_t size,
 
 VlogFetcher::VlogFetcher(const std::string& dbname, const Options& options,
                          const uint32_t log_number, int entries) {
-  Status s =
-      options.env->NewSequentialFile(LogFileName(dbname, log_number), &file_);
+  Status s = options.env->NewNonMmapRandomAccessFile(
+      LogFileName(dbname, log_number), &file_);
   assert(s.ok());
 }
 

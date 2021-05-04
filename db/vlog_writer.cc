@@ -33,29 +33,38 @@ Status VWriter::AddRecord(const Slice& slice) {
   Status s;
 
   if (my_info_->size_ + kVHeaderSize + left > WriteBufferSize) {
-    MutexLock l(&my_info_->mutex_);
+    bool locked = false;
+    while (!my_info_->critical_is_locked.compare_exchange_weak(
+        locked, true, std::memory_order_acq_rel)) {
+      locked = false;
+    }
     if (!(s = dest_->SyncedAppend(Slice(my_info_->buffer_, my_info_->size_)))
              .ok()) {
+      my_info_->critical_is_locked.store(false, std::memory_order_release);
       return s;
     }
     my_info_->head_ += my_info_->size_;
     my_info_->size_ = 0;
-  }
-
-  if (my_info_->size_ + kVHeaderSize + left > WriteBufferSize) {
-    assert(my_info_->size_ == 0);
-    s = dest_->SyncedAppend(Slice(head, kVHeaderSize));
-    my_info_->head_ += kVHeaderSize;
-    if (s.ok()) {
+    if (kVHeaderSize + left > WriteBufferSize) {
+      s = dest_->SyncedAppend(Slice(head, kVHeaderSize));
+      my_info_->head_ += kVHeaderSize;
       s = dest_->SyncedAppend(Slice(ptr, left));
       my_info_->head_ += left;
+    } else {
+      memcpy(my_info_->buffer_ + my_info_->size_, head, kVHeaderSize);
+      my_info_->size_ += kVHeaderSize;
+      memcpy(my_info_->buffer_ + my_info_->size_, ptr, left);
+      my_info_->size_ += left;
     }
-  } else {
-    memcpy(my_info_->buffer_ + my_info_->size_, head, kVHeaderSize);
-    my_info_->size_ += kVHeaderSize;
-    memcpy(my_info_->buffer_ + my_info_->size_, ptr, left);
-    my_info_->size_ += left;
+    my_info_->critical_is_locked.store(false, std::memory_order_release);
+    return s;
   }
+
+  memcpy(my_info_->buffer_ + my_info_->size_, head, kVHeaderSize);
+  my_info_->size_ += kVHeaderSize;
+  memcpy(my_info_->buffer_ + my_info_->size_, ptr, left);
+  my_info_->size_ += left;
+
   return s;
 }
 

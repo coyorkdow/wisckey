@@ -4,6 +4,7 @@
 #include "db/vlog_fetcher.h"
 #include "db/vlog_reader.h"
 #include "db/vlog_writer.h"
+#include <atomic>
 #include <map>
 #include <set>
 
@@ -19,17 +20,17 @@ class VWriter;
 
 class VlogInfo {
   char buffer_[WriteBufferSize];
-  int size_;
+  size_t size_;
   VlogFetcher* vlog_fetch_;
   VWriter* vlog_write_;
   size_t head_;
 
   uint64_t count_;  //代表该vlog文件垃圾kv的数量
 
-  port::Mutex mutex_;
+  std::atomic<bool> critical_is_locked;
 
  public:
-  VlogInfo() : size_(0), head_(0) {}
+  VlogInfo() : size_(0), head_(0), critical_is_locked(false) {}
 
   friend class VWriter;
   friend class VlogFetcher;
