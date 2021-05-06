@@ -34,6 +34,20 @@ class SCOPED_LOCKABLE MutexLock {
   port::Mutex* const mu_;
 };
 
+class SCOPED_LOCKABLE WLock {
+ public:
+  explicit WLock(port::SharedMutex* mu) EXCLUSIVE_LOCK_FUNCTION(mu) : mu_(mu) {
+    this->mu_->UniqueLock();
+  }
+  ~WLock() UNLOCK_FUNCTION() { this->mu_->UniqueUnlock(); }
+
+  WLock(const WLock&) = delete;
+  WLock& operator=(const WLock&) = delete;
+
+ private:
+  port::SharedMutex* const mu_;
+};
+
 }  // namespace leveldb
 
 #endif  // STORAGE_LEVELDB_UTIL_MUTEXLOCK_H_

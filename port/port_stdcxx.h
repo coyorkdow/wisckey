@@ -29,6 +29,7 @@
 #include <snappy.h>
 #endif  // HAVE_SNAPPY
 
+#include <atomic>
 #include <cassert>
 #include <condition_variable>  // NOLINT
 #include <cstddef>
@@ -42,6 +43,50 @@ namespace leveldb {
 namespace port {
 
 class CondVar;
+
+class LOCKABLE SharedMutex {
+ public:
+  SharedMutex() = default;
+  virtual ~SharedMutex() = default;
+
+  virtual void SharedLock() SHARED_LOCK_FUNCTION() = 0;
+  virtual void SharedUnlock() SHARED_UNLOCK_FUNCTION() = 0;
+  virtual void UniqueLock() EXCLUSIVE_LOCK_FUNCTION() = 0;
+  virtual void UniqueUnlock() UNLOCK_FUNCTION() = 0;
+  void AssertHeld() ASSERT_EXCLUSIVE_LOCK() {}
+};
+
+class SpinSharedMutex : public SharedMutex {
+  static const uint64_t UNLOCKED = 0;
+  static const uint64_t UNIQUE_LOCKED = 1ULL << 63;
+
+ public:
+  SpinSharedMutex() : lock_(UNLOCKED) {}
+  ~SpinSharedMutex() override = default;
+
+  void UniqueLock() override {
+    uint64_t expect;
+    do {
+      expect = UNLOCKED;
+    } while (!lock_.compare_exchange_weak(expect, UNIQUE_LOCKED,
+                                          std::memory_order_acq_rel));
+  }
+  void UniqueUnlock() override {
+    assert(lock_ & UNIQUE_LOCKED);
+    lock_.fetch_sub(UNIQUE_LOCKED, std::memory_order_release);
+  }
+  void SharedLock() override {
+    lock_.fetch_add(1, std::memory_order_acquire);
+    while (lock_.load(std::memory_order_acquire) > UNIQUE_LOCKED)
+      ;
+  }
+  void SharedUnlock() override {
+    lock_.fetch_sub(1, std::memory_order_release);
+  }
+
+ private:
+  std::atomic<uint64_t> lock_;
+};
 
 // Thinly wraps std::mutex.
 class LOCKABLE Mutex {

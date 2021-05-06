@@ -8,6 +8,8 @@
 #include <map>
 #include <set>
 
+#include "port/port_stdcxx.h"
+
 namespace leveldb {
 namespace vlog {
 // Header is checksum (4 bytes), length (8 bytes).
@@ -27,10 +29,11 @@ class VlogInfo {
 
   uint64_t count_;  //代表该vlog文件垃圾kv的数量
 
-  std::atomic<bool> critical_is_locked;
+  port::SharedMutex* rwlock_;
 
  public:
-  VlogInfo() : size_(0), head_(0), critical_is_locked(false) {}
+  VlogInfo() : size_(0), head_(0), rwlock_(new port::SpinSharedMutex) {}
+  ~VlogInfo() { delete rwlock_; }
 
   friend class VWriter;
   friend class VlogFetcher;

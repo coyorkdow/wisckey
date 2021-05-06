@@ -33,14 +33,9 @@ Status VWriter::AddRecord(const Slice& slice) {
   Status s;
 
   if (my_info_->size_ + kVHeaderSize + left > WriteBufferSize) {
-    bool locked = false;
-    while (!my_info_->critical_is_locked.compare_exchange_weak(
-        locked, true, std::memory_order_acq_rel)) {
-      locked = false;
-    }
+    WLock l(my_info_->rwlock_);
     if (!(s = dest_->SyncedAppend(Slice(my_info_->buffer_, my_info_->size_)))
              .ok()) {
-      my_info_->critical_is_locked.store(false, std::memory_order_release);
       return s;
     }
     my_info_->head_ += my_info_->size_;
@@ -56,7 +51,6 @@ Status VWriter::AddRecord(const Slice& slice) {
       memcpy(my_info_->buffer_ + my_info_->size_, ptr, left);
       my_info_->size_ += left;
     }
-    my_info_->critical_is_locked.store(false, std::memory_order_release);
     return s;
   }
 

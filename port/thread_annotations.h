@@ -72,7 +72,17 @@
 
 #ifndef SHARED_LOCK_FUNCTION
 #define SHARED_LOCK_FUNCTION(...) \
+  __attribute__((acquire_shared_capability(__VA_ARGS__)))
+#endif
+
+#ifndef SHARED_LOCK_FUNCTION
+#define SHARED_LOCK_FUNCTION(...) \
   THREAD_ANNOTATION_ATTRIBUTE__(shared_lock_function(__VA_ARGS__))
+#endif
+
+#ifndef SHARED_UNLOCK_FUNCTION
+#define SHARED_UNLOCK_FUNCTION(...) \
+  __attribute__((release_shared_capability(__VA_ARGS__)))
 #endif
 
 #ifndef EXCLUSIVE_TRYLOCK_FUNCTION

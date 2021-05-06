@@ -1146,6 +1146,7 @@ Status DBImpl::Get(const ReadOptions& options, const Slice& key,
       s = current->Get(options, lkey, &addr, &stats);
       have_stat_update = true;
     }
+    if (s.ok()) s = vlog_manager_.FetchValueFromVlog(addr, value);
     mutex_.Lock();
   }
 
@@ -1155,10 +1156,7 @@ Status DBImpl::Get(const ReadOptions& options, const Slice& key,
   mem->Unref();
   if (imm != nullptr) imm->Unref();
   current->Unref();
-  //  return s;
-
-  if (!s.ok()) return s;
-  return vlog_manager_.FetchValueFromVlog(addr, value);
+  return s;
 }
 
 Status DBImpl::Fetch(Slice addr, std::string* value) {
