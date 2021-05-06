@@ -38,7 +38,7 @@ void VlogManager::AddVlog(const std::string& dbname, const Options& options,
                                             &v->vlog_write_->dest_);
   assert(s.ok());
   // VlogFetcher must initialize after WritableFile is created;
-  v->vlog_fetch_ = new VlogFetcher(dbname, options, vlog_numb, 1 << 16);
+  v->vlog_fetch_ = new VlogFetcher(dbname, options, vlog_numb);
   v->vlog_write_->my_info_ = v;
   v->vlog_fetch_->my_info_ = v;
   v->count_ = 0;
