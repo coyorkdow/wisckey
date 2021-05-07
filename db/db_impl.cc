@@ -1163,6 +1163,24 @@ Status DBImpl::Fetch(Slice addr, std::string* value) {
   return vlog_manager_.FetchValueFromVlog(addr, value);
 }
 
+void DBImpl::ConcurrenceFetch(IterCache& cache, uint64_t seq) {
+  void** argv = reinterpret_cast<void**>(malloc(3 * sizeof(uint64_t*)));
+  argv[0] = this;
+  argv[1] = &cache;
+  EncodeFixed64(reinterpret_cast<char*>(&argv[2]), seq);
+  env_->Schedule(&DBImpl::BGFetch, argv);
+}
+
+void DBImpl::BGFetch(void* args) {
+  void** argv = reinterpret_cast<void**>(args);
+  DBImpl* db = reinterpret_cast<DBImpl*>(argv[0]);
+  IterCache* cache = reinterpret_cast<IterCache*>(argv[1]);
+  cache->status = db->Fetch(cache->addr_, &cache->val_);
+  cache->sequence.store(DecodeFixed64(reinterpret_cast<char*>(&argv[2])),
+                        std::memory_order_release);
+  free(args);
+}
+
 Iterator* DBImpl::NewIterator(const ReadOptions& options) {
   SequenceNumber latest_snapshot;
   uint32_t seed;

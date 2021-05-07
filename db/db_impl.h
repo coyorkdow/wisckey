@@ -22,6 +22,8 @@
 #include "port/port.h"
 #include "port/thread_annotations.h"
 
+#include "db_iter.h"
+
 namespace leveldb {
 
 class MemTable;
@@ -47,6 +49,7 @@ class DBImpl : public DB {
   Status Get(const ReadOptions& options, const Slice& key,
              std::string* value) override;
   Status Fetch(Slice addr, std::string* value);
+  void ConcurrenceFetch(IterCache& cache, uint64_t seq);
 
   Iterator* NewIterator(const ReadOptions&) override;
   const Snapshot* GetSnapshot() override;
@@ -145,6 +148,7 @@ class DBImpl : public DB {
 
   void MaybeScheduleCompaction() EXCLUSIVE_LOCKS_REQUIRED(mutex_);
   static void BGWork(void* db);
+  static void BGFetch(void *args);
   void BackgroundCall();
   void BackgroundCompaction() EXCLUSIVE_LOCKS_REQUIRED(mutex_);
   void CleanupCompaction(CompactionState* compact)

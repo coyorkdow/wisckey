@@ -7,8 +7,11 @@
 #include "db/db_impl.h"
 #include "db/dbformat.h"
 #include "db/filename.h"
+#include <vector>
+
 #include "leveldb/env.h"
 #include "leveldb/iterator.h"
+
 #include "port/port.h"
 #include "util/logging.h"
 #include "util/mutexlock.h"
@@ -37,6 +40,8 @@ namespace {
 // representation into a single entry while accounting for sequence
 // numbers, deletion markers, overwrites, etc.
 class DBIter : public Iterator {
+  friend class ConcurrenceDBIter;
+
  public:
   // Which direction is the iterator currently moving?
   // (1) When moving forward, the internal iterator is positioned at
@@ -116,13 +121,118 @@ class DBIter : public Iterator {
   Iterator* const iter_;
   SequenceNumber const sequence_;
   Status status_;
-  std::string saved_key_;    // == current key when direction_==kReverse
+  std::string saved_key_;   // == current key when direction_==kReverse
   std::string saved_addr_;  // == current raw value when direction_==kReverse
   mutable std::string saved_value_;
   Direction direction_;
   bool valid_;
   Random rnd_;
   size_t bytes_until_read_sampling_;
+};
+
+class ConcurrenceDBIter : public Iterator {
+  friend class DBImpl;
+  const size_t MAX_SIZE = 1024;
+
+ public:
+  ConcurrenceDBIter(DBImpl* db, const Comparator* cmp, Iterator* iter,
+                    SequenceNumber s, uint32_t seed)
+      : dbIter_(db, cmp, iter, s, seed),
+        front_(1ULL << 63),
+        back_(1ULL << 63),
+        cur_index_(1ULL << 63) {
+    buffer_queue_.resize(MAX_SIZE);
+  }
+
+  ConcurrenceDBIter(const ConcurrenceDBIter&) = delete;
+  ConcurrenceDBIter& operator=(const ConcurrenceDBIter&) = delete;
+
+  ~ConcurrenceDBIter() override = default;
+  bool Valid() const override {
+    return buffer_queue_[cur_index_ % MAX_SIZE].valid_;
+  }
+  Slice key() const override {
+    size_t i = cur_index_ % MAX_SIZE;
+    assert(buffer_queue_[i].valid_);
+    return buffer_queue_[i].key_;
+  }
+  Slice value() const override {
+    size_t i = cur_index_ % MAX_SIZE;
+    assert(buffer_queue_[i].valid_);
+    while (buffer_queue_[i].sequence.load(std::memory_order_acquire) !=
+           cur_index_)
+      ;
+    return buffer_queue_[i].val_;
+  }
+  Status status() const override {
+    return buffer_queue_[cur_index_ % MAX_SIZE].status;
+  }
+
+  void Next() override {
+    cur_index_++;
+    if (cur_index_ == back_) {
+      for (uint64_t s = cur_index_; s < cur_index_ + 256; s++) {
+        dbIter_.Next();
+        if (!GetValue(back_++ % MAX_SIZE, s)) break;
+      }
+    }
+    while (back_ - front_ > MAX_SIZE) front_++;
+  }
+
+  void Prev() override {
+    if (cur_index_ == front_) {
+      for (uint64_t s = cur_index_ - 1; s >= cur_index_ - 256; s--) {
+        dbIter_.Prev();
+        if (!GetValue(--front_ % MAX_SIZE, s)) break;
+      }
+    }
+    cur_index_--;
+    while (back_ - front_ > MAX_SIZE) back_--;
+  }
+
+  void Seek(const Slice& target) override {
+    dbIter_.Seek(target);
+    AfterSeek();
+  }
+  void SeekToFirst() override {
+    dbIter_.SeekToFirst();
+    AfterSeek();
+  }
+  void SeekToLast() override {
+    dbIter_.SeekToLast();
+    AfterSeek();
+  }
+
+ private:
+  DBIter dbIter_;
+  std::vector<IterCache> buffer_queue_;
+  size_t cur_index_;
+  size_t back_;
+  size_t front_;
+
+  void AfterSeek() {
+    front_ = 1ULL << 63;
+    back_ = 1ULL << 63;
+    cur_index_ = 1ULL << 63;
+    GetValue(back_++ % MAX_SIZE, cur_index_);
+  }
+
+  bool GetValue(size_t i, uint64_t seq) {
+    buffer_queue_[i].sequence = 0;
+    if (!dbIter_.valid_) {
+      buffer_queue_[i].valid_ = false;
+      return false;
+    }
+    buffer_queue_[i].valid_ = true;
+    buffer_queue_[i].key_ = std::move(dbIter_.key().ToString());
+    if (dbIter_.direction_ == DBIter::kForward) {
+      buffer_queue_[i].addr_ = std::move(dbIter_.iter_->value().ToString());
+    } else {
+      buffer_queue_[i].addr_ = std::move(dbIter_.saved_addr_);
+    }
+    dbIter_.db_->ConcurrenceFetch(buffer_queue_[i], seq);
+    return true;
+  }
 };
 
 inline bool DBIter::ParseKey(ParsedInternalKey* ikey) {
@@ -318,7 +428,8 @@ void DBIter::SeekToLast() {
 Iterator* NewDBIterator(DBImpl* db, const Comparator* user_key_comparator,
                         Iterator* internal_iter, SequenceNumber sequence,
                         uint32_t seed) {
-  return new DBIter(db, user_key_comparator, internal_iter, sequence, seed);
+  return new ConcurrenceDBIter(db, user_key_comparator, internal_iter, sequence,
+                               seed);
 }
 
 }  // namespace leveldb

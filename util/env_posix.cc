@@ -809,8 +809,10 @@ void PosixEnv::Schedule(
   // Start the background thread, if we haven't done so already.
   if (!started_background_thread_) {
     started_background_thread_ = true;
-    std::thread background_thread(PosixEnv::BackgroundThreadEntryPoint, this);
-    background_thread.detach();
+    for (int i = 0; i < 32; i++) {
+      std::thread background_thread(PosixEnv::BackgroundThreadEntryPoint, this);
+      background_thread.detach();
+    }
   }
 
   // If the queue is empty, the background thread may be waiting for work.
