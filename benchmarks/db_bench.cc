@@ -2,11 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
-#include <sys/types.h>
-
+#include "db/db_impl.h"
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <thread>
 
 #include "leveldb/cache.h"
 #include "leveldb/comparator.h"
@@ -14,6 +14,7 @@
 #include "leveldb/env.h"
 #include "leveldb/filter_policy.h"
 #include "leveldb/write_batch.h"
+
 #include "port/port.h"
 #include "util/crc32c.h"
 #include "util/histogram.h"
@@ -32,6 +33,9 @@
 //      deleterandom  -- delete N keys in random order
 //      readseq       -- read N times sequentially
 //      readreverse   -- read N times in reverse order
+//      readaddrseq
+//      readaddrreverse
+//      fetchvaluefromaddr
 //      readrandom    -- read N times in random order
 //      readmissing   -- read N missing keys in random order
 //      readhot       -- read N times in random order from 1% section of DB
@@ -53,6 +57,10 @@ static const char* FLAGS_benchmarks =
     "readrandom,"  // Extra run to allow previous compactions to quiesce
     "readseq,"
     "readreverse,"
+    "readaddrseq,"
+    "fetchvaluefromaddr,"
+    "readaddrreverse,"
+    "fetchvaluefromaddr,"
     "compact,"
     "readrandom,"
     "readseq,"
@@ -548,6 +556,12 @@ class Benchmark {
         method = &Benchmark::ReadSequential;
       } else if (name == Slice("readreverse")) {
         method = &Benchmark::ReadReverse;
+      } else if (name == Slice("readaddrseq")) {
+        method = &Benchmark::ReadAddrSequential;
+      } else if (name == Slice("readaddrreverse")) {
+        method = &Benchmark::ReadAddrReverse;
+      } else if (name == Slice("fetchvaluefromaddr")) {
+        method = &Benchmark::FetchValueFromAddrList;
       } else if (name == Slice("readrandom")) {
         method = &Benchmark::ReadRandom;
       } else if (name == Slice("readmissing")) {
@@ -825,10 +839,11 @@ class Benchmark {
     int i = 0;
     int64_t bytes = 0;
     for (iter->SeekToFirst(); i < reads_ && iter->Valid(); iter->Next()) {
-      bytes += iter->key().size() + iter->value().size();
+      //      bytes += iter->key().size() + iter->value().size();
       thread->stats.FinishedSingleOp();
       ++i;
     }
+    bytes += iter->datasize();
     delete iter;
     thread->stats.AddBytes(bytes);
   }
@@ -838,7 +853,83 @@ class Benchmark {
     int i = 0;
     int64_t bytes = 0;
     for (iter->SeekToLast(); i < reads_ && iter->Valid(); iter->Prev()) {
-      bytes += iter->key().size() + iter->value().size();
+      //      bytes += iter->key().size() + iter->value().size();
+      thread->stats.FinishedSingleOp();
+      ++i;
+    }
+    bytes += iter->datasize();
+    delete iter;
+    thread->stats.AddBytes(bytes);
+  }
+
+  using AddrList = std::vector<std::string>;
+  AddrList addr_list_;
+  std::atomic<uint64_t> data_size_from_addr_list_;
+
+  static void Worker(ThreadState* thread, int numb, DBImpl* db,
+                     AddrList::iterator begin, AddrList::iterator end,
+                     std::atomic<uint64_t>* data_size) {
+    //    std::fprintf(stderr, "thread#%d start\n", numb);
+    std::string value;
+    uint64_t bytes = 0;
+    while (begin != end) {
+      db->Fetch(*begin, &value);
+      thread->stats.FinishedSingleOp();
+      bytes += value.size();
+      begin++;
+    }
+    data_size->fetch_add(bytes, std::memory_order_release);
+    //    std::fprintf(stderr, "thread#%d end\n", numb);
+  }
+
+  void FetchValueFromAddrList(ThreadState* thread) {
+    data_size_from_addr_list_ = 0;
+    int for_per_thread = 100000;
+    std::vector<std::thread> threads;
+    std::fprintf(stderr, "%lu addresses record found\n", addr_list_.size());
+    AddrList::iterator start = addr_list_.begin();
+    int t = 0;
+    while (addr_list_.end() - start > for_per_thread) {
+      std::thread background_thread(
+          Worker, thread, ++t, reinterpret_cast<DBImpl*>(db_), start,
+          start + for_per_thread, &data_size_from_addr_list_);
+      threads.emplace_back(std::move(background_thread));
+      start += for_per_thread;
+    }
+    if (start != addr_list_.end()) {
+      std::thread background_thread(
+          Worker, thread, ++t, reinterpret_cast<DBImpl*>(db_), start,
+          addr_list_.end(), &data_size_from_addr_list_);
+      threads.emplace_back(std::move(background_thread));
+    }
+    for (auto& each : threads) each.join();
+    thread->stats.AddBytes(
+        data_size_from_addr_list_.load(std::memory_order_consume));
+  }
+
+  void ReadAddrSequential(ThreadState* thread) {
+    addr_list_.clear();
+    Iterator* iter = db_->NewAddrIterator(ReadOptions());
+    int i = 0;
+    int64_t bytes = 0;
+    for (iter->SeekToFirst(); i < reads_ && iter->Valid(); iter->Next()) {
+      addr_list_.emplace_back(std::move(iter->value().ToString()));
+      bytes += iter->key().size() + addr_list_.back().size();
+      thread->stats.FinishedSingleOp();
+      ++i;
+    }
+    delete iter;
+    thread->stats.AddBytes(bytes);
+  }
+
+  void ReadAddrReverse(ThreadState* thread) {
+    addr_list_.clear();
+    Iterator* iter = db_->NewAddrIterator(ReadOptions());
+    int i = 0;
+    int64_t bytes = 0;
+    for (iter->SeekToLast(); i < reads_ && iter->Valid(); iter->Prev()) {
+      addr_list_.emplace_back(std::move(iter->value().ToString()));
+      bytes += iter->key().size() + addr_list_.back().size();
       thread->stats.FinishedSingleOp();
       ++i;
     }

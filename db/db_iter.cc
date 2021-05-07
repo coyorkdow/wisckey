@@ -7,8 +7,13 @@
 #include "db/db_impl.h"
 #include "db/dbformat.h"
 #include "db/filename.h"
+#include <queue>
+#include <thread>
+#include <vector>
+
 #include "leveldb/env.h"
 #include "leveldb/iterator.h"
+
 #include "port/port.h"
 #include "util/logging.h"
 #include "util/mutexlock.h"
@@ -29,14 +34,14 @@ static void DumpInternalIter(Iterator* iter) {
 }
 #endif
 
-namespace {
-
 // Memtables and sstables that make the DB representation contain
 // (userkey,seq,type) => uservalue entries.  DBIter
 // combines multiple entries for the same userkey found in the DB
 // representation into a single entry while accounting for sequence
 // numbers, deletion markers, overwrites, etc.
-class DBIter : public Iterator {
+class DBAddrIter : public Iterator {
+  friend class ConcurrenceDBIter;
+
  public:
   // Which direction is the iterator currently moving?
   // (1) When moving forward, the internal iterator is positioned at
@@ -45,8 +50,8 @@ class DBIter : public Iterator {
   //     just before all entries whose user key == this->key().
   enum Direction { kForward, kReverse };
 
-  DBIter(DBImpl* db, const Comparator* cmp, Iterator* iter, SequenceNumber s,
-         uint32_t seed)
+  DBAddrIter(DBImpl* db, const Comparator* cmp, Iterator* iter,
+             SequenceNumber s, uint32_t seed)
       : db_(db),
         user_comparator_(cmp),
         iter_(iter),
@@ -56,10 +61,10 @@ class DBIter : public Iterator {
         rnd_(seed),
         bytes_until_read_sampling_(RandomCompactionPeriod()) {}
 
-  DBIter(const DBIter&) = delete;
-  DBIter& operator=(const DBIter&) = delete;
+  DBAddrIter(const DBAddrIter&) = delete;
+  DBAddrIter& operator=(const DBAddrIter&) = delete;
 
-  ~DBIter() override { delete iter_; }
+  ~DBAddrIter() override { delete iter_; }
   bool Valid() const override { return valid_; }
   Slice key() const override {
     assert(valid_);
@@ -67,12 +72,7 @@ class DBIter : public Iterator {
   }
   Slice value() const override {
     assert(valid_);
-    if (direction_ == kForward) {
-      db_->Fetch(iter_->value(), &saved_value_);
-    } else {
-      db_->Fetch(saved_addr_, &saved_value_);
-    }
-    return saved_value_;
+    return (direction_ == kForward) ? iter_->value() : saved_value_;
   }
   Status status() const override {
     if (status_.ok()) {
@@ -98,11 +98,11 @@ class DBIter : public Iterator {
   }
 
   inline void ClearSavedValue() {
-    if (saved_addr_.capacity() > 1048576) {
+    if (saved_value_.capacity() > 1048576) {
       std::string empty;
-      swap(empty, saved_addr_);
+      swap(empty, saved_value_);
     } else {
-      saved_addr_.clear();
+      saved_value_.clear();
     }
   }
 
@@ -116,16 +116,207 @@ class DBIter : public Iterator {
   Iterator* const iter_;
   SequenceNumber const sequence_;
   Status status_;
-  std::string saved_key_;    // == current key when direction_==kReverse
-  std::string saved_addr_;  // == current raw value when direction_==kReverse
-  mutable std::string saved_value_;
+  std::string saved_key_;   // == current key when direction_==kReverse
+  std::string saved_value_;  // == current raw value when direction_==kReverse
   Direction direction_;
   bool valid_;
   Random rnd_;
   size_t bytes_until_read_sampling_;
 };
 
-inline bool DBIter::ParseKey(ParsedInternalKey* ikey) {
+struct TaskQueue {
+  TaskQueue() : head_(0), tail_(0), con_(&mutex_) { que_.resize(512); }
+  std::vector<std::pair<uint64_t, uint64_t>> que_;
+  size_t head_;
+  size_t tail_;
+  port::Mutex mutex_;
+  port::CondVar con_;
+};
+
+class ConcurrenceDBIter : public Iterator {
+  friend class DBImpl;
+  const size_t MAX_SIZE = 1024;
+
+ public:
+  ConcurrenceDBIter(DBImpl* db, const Comparator* cmp, Iterator* iter,
+                    SequenceNumber s, uint32_t seed)
+      : dbIter_(db, cmp, iter, s, seed),
+        front_(1ULL << 63),
+        back_(1ULL << 63),
+        cur_index_(1ULL << 63),
+        tot_tasks_(0),
+        completed_tasks_(0),
+        data_size_(0),
+        closing_(false) {
+    buffer_queue_.resize(MAX_SIZE);
+    for (int i = 0; i < 32; i++) {
+      threads_.emplace_back(std::move(std::thread(Worker, this, i)));
+    }
+  }
+
+  ConcurrenceDBIter(const ConcurrenceDBIter&) = delete;
+  ConcurrenceDBIter& operator=(const ConcurrenceDBIter&) = delete;
+
+  ~ConcurrenceDBIter() override {
+    while (completed_tasks_.load(std::memory_order_acquire) != tot_tasks_)
+      ;
+    closing_.store(true, std::memory_order_release);
+    sched_yield();
+    task_ques_.con_.SignalAll();
+    for (auto& t : threads_) t.join();
+  }
+
+  bool Valid() const override {
+    return buffer_queue_[cur_index_ % MAX_SIZE].valid_;
+  }
+  Slice key() const override {
+    size_t i = cur_index_ % MAX_SIZE;
+    assert(buffer_queue_[i].valid_);
+    return buffer_queue_[i].key_;
+  }
+  uint64_t datasize() const override {
+    while (completed_tasks_.load(std::memory_order_acquire) != tot_tasks_)
+      ;
+    return data_size_;
+  }
+  Slice value() const override {
+    size_t i = cur_index_ % MAX_SIZE;
+    assert(buffer_queue_[i].valid_);
+    while (buffer_queue_[i].sequence.load(std::memory_order_acquire) !=
+           cur_index_)
+      ;
+    return buffer_queue_[i].val_;
+  }
+  Status status() const override {
+    return buffer_queue_[cur_index_ % MAX_SIZE].status;
+  }
+
+  void Next() override {
+    cur_index_++;
+    if (cur_index_ == back_) {
+      for (uint64_t s = cur_index_; s < cur_index_ + 256; s++) {
+        dbIter_.Next();
+        if (!GetValue(back_++ % MAX_SIZE, s)) break;
+      }
+      while (back_ - front_ > MAX_SIZE) front_++;
+    }
+  }
+
+  void Prev() override {
+    if (cur_index_ == front_) {
+      for (uint64_t s = cur_index_ - 1; s >= cur_index_ - 256; s--) {
+        dbIter_.Prev();
+        if (!GetValue(--front_ % MAX_SIZE, s)) break;
+      }
+      while (back_ - front_ > MAX_SIZE) back_--;
+    }
+    cur_index_--;
+  }
+
+  void Seek(const Slice& target) override {
+    dbIter_.Seek(target);
+    AfterSeek();
+  }
+  void SeekToFirst() override {
+    dbIter_.SeekToFirst();
+    AfterSeek();
+  }
+  void SeekToLast() override {
+    dbIter_.SeekToLast();
+    AfterSeek();
+  }
+
+ private:
+  DBAddrIter dbIter_;
+  std::vector<IterCache> buffer_queue_;
+  size_t cur_index_;
+  size_t back_;
+  size_t front_;
+
+  void AfterSeek() {
+    front_ = 1ULL << 63;
+    back_ = 1ULL << 63;
+    cur_index_ = 1ULL << 63;
+    while (completed_tasks_.load(std::memory_order_acquire) != tot_tasks_)
+      ;
+    completed_tasks_ = 0;
+    tot_tasks_ = 0;
+    GetValue(back_++ % MAX_SIZE, cur_index_);
+  }
+
+  static void Worker(ConcurrenceDBIter* iter, int q) {
+    auto& queue = iter->task_ques_;
+#define TAIL (queue.que_[queue.tail_ % queue.que_.size()])
+    auto db = iter->dbIter_.db_;
+    while (true) {
+      queue.mutex_.Lock();
+      while (queue.tail_ == queue.head_) {
+        if (iter->closing_.load(std::memory_order_acquire)) {
+          break;
+        };
+        queue.con_.Wait();
+      }
+
+      if (iter->closing_.load(std::memory_order_acquire)) {
+        break;
+      }
+
+      auto& item = iter->buffer_queue_[TAIL.first];
+      uint64_t seq = TAIL.second;
+      //      queue.que_.pop();
+      queue.tail_++;
+      queue.mutex_.Unlock();
+
+      db->Fetch(item.addr_, &item.val_);
+      item.sequence.store(seq, std::memory_order_release);
+      iter->data_size_.fetch_add(item.val_.size(), std::memory_order_release);
+      iter->completed_tasks_.fetch_add(1, std::memory_order_relaxed);
+    }
+#undef TAIL
+    queue.mutex_.Unlock();
+  }
+
+  bool GetValue(size_t i, uint64_t seq) {
+    buffer_queue_[i].sequence = 0;
+    if (!dbIter_.valid_) {
+      buffer_queue_[i].valid_ = false;
+      return false;
+    }
+    buffer_queue_[i].valid_ = true;
+    buffer_queue_[i].key_ = std::move(dbIter_.key().ToString());
+    data_size_.fetch_add(buffer_queue_[i].key_.size(),
+                         std::memory_order_relaxed);
+    if (dbIter_.direction_ == DBAddrIter::kForward) {
+      buffer_queue_[i].addr_ = std::move(dbIter_.iter_->value().ToString());
+    } else {
+      buffer_queue_[i].addr_ = std::move(dbIter_.saved_value_);
+    }
+    tot_tasks_++;
+    task_ques_.mutex_.Lock();
+#define HEAD (task_ques_.que_[task_ques_.head_ % task_ques_.que_.size()])
+    if (task_ques_.tail_ == task_ques_.head_) {
+      task_ques_.con_.Signal();
+    }
+    if (task_ques_.head_ - task_ques_.tail_ == task_ques_.que_.size()) {
+      task_ques_.que_.resize(task_ques_.que_.size() * 2);
+    }
+    HEAD = std::make_pair(i, seq);
+    task_ques_.head_++;
+    task_ques_.mutex_.Unlock();
+    return true;
+  }
+
+  std::vector<std::thread> threads_;
+  TaskQueue task_ques_;
+  std::atomic<bool> closing_;
+
+  uint64_t tot_tasks_;
+
+  alignas(64) std::atomic<uint64_t> completed_tasks_;
+  alignas(64) std::atomic<uint64_t> data_size_;
+};
+
+inline bool DBAddrIter::ParseKey(ParsedInternalKey* ikey) {
   Slice k = iter_->key();
 
   size_t bytes_read = k.size() + iter_->value().size();
@@ -144,7 +335,7 @@ inline bool DBIter::ParseKey(ParsedInternalKey* ikey) {
   }
 }
 
-void DBIter::Next() {
+void DBAddrIter::Next() {
   assert(valid_);
 
   if (direction_ == kReverse) {  // Switch directions?
@@ -180,7 +371,7 @@ void DBIter::Next() {
   FindNextUserEntry(true, &saved_key_);
 }
 
-void DBIter::FindNextUserEntry(bool skipping, std::string* skip) {
+void DBAddrIter::FindNextUserEntry(bool skipping, std::string* skip) {
   // Loop until we hit an acceptable entry to yield
   assert(iter_->Valid());
   assert(direction_ == kForward);
@@ -212,7 +403,7 @@ void DBIter::FindNextUserEntry(bool skipping, std::string* skip) {
   valid_ = false;
 }
 
-void DBIter::Prev() {
+void DBAddrIter::Prev() {
   assert(valid_);
 
   if (direction_ == kForward) {  // Switch directions?
@@ -239,7 +430,7 @@ void DBIter::Prev() {
   FindPrevUserEntry();
 }
 
-void DBIter::FindPrevUserEntry() {
+void DBAddrIter::FindPrevUserEntry() {
   assert(direction_ == kReverse);
 
   ValueType value_type = kTypeDeletion;
@@ -258,12 +449,12 @@ void DBIter::FindPrevUserEntry() {
           ClearSavedValue();
         } else {
           Slice raw_value = iter_->value();
-          if (saved_addr_.capacity() > raw_value.size() + 1048576) {
+          if (saved_value_.capacity() > raw_value.size() + 1048576) {
             std::string empty;
-            swap(empty, saved_addr_);
+            swap(empty, saved_value_);
           }
           SaveKey(ExtractUserKey(iter_->key()), &saved_key_);
-          saved_addr_.assign(raw_value.data(), raw_value.size());
+          saved_value_.assign(raw_value.data(), raw_value.size());
         }
       }
       iter_->Prev();
@@ -281,7 +472,7 @@ void DBIter::FindPrevUserEntry() {
   }
 }
 
-void DBIter::Seek(const Slice& target) {
+void DBAddrIter::Seek(const Slice& target) {
   direction_ = kForward;
   ClearSavedValue();
   saved_key_.clear();
@@ -295,7 +486,7 @@ void DBIter::Seek(const Slice& target) {
   }
 }
 
-void DBIter::SeekToFirst() {
+void DBAddrIter::SeekToFirst() {
   direction_ = kForward;
   ClearSavedValue();
   iter_->SeekToFirst();
@@ -306,19 +497,24 @@ void DBIter::SeekToFirst() {
   }
 }
 
-void DBIter::SeekToLast() {
+void DBAddrIter::SeekToLast() {
   direction_ = kReverse;
   ClearSavedValue();
   iter_->SeekToLast();
   FindPrevUserEntry();
 }
 
-}  // anonymous namespace
-
 Iterator* NewDBIterator(DBImpl* db, const Comparator* user_key_comparator,
                         Iterator* internal_iter, SequenceNumber sequence,
                         uint32_t seed) {
-  return new DBIter(db, user_key_comparator, internal_iter, sequence, seed);
+  return new ConcurrenceDBIter(db, user_key_comparator, internal_iter, sequence,
+                               seed);
+}
+
+Iterator* NewDBAddrIterator(DBImpl* db, const Comparator* user_key_comparator,
+                            Iterator* internal_iter, SequenceNumber sequence,
+                            uint32_t seed) {
+  return new DBAddrIter(db, user_key_comparator, internal_iter, sequence, seed);
 }
 
 }  // namespace leveldb

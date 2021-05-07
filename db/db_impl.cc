@@ -1175,6 +1175,19 @@ Iterator* DBImpl::NewIterator(const ReadOptions& options) {
                        seed);
 }
 
+Iterator* DBImpl::NewAddrIterator(const ReadOptions& options) {
+  SequenceNumber latest_snapshot;
+  uint32_t seed;
+  Iterator* iter = NewInternalIterator(options, &latest_snapshot, &seed);
+  return NewDBAddrIterator(
+      this, user_comparator(), iter,
+      (options.snapshot != nullptr
+           ? static_cast<const SnapshotImpl*>(options.snapshot)
+                 ->sequence_number()
+           : latest_snapshot),
+      seed);
+}
+
 void DBImpl::RecordReadSample(Slice key) {
   MutexLock l(&mutex_);
   if (versions_->current()->RecordReadSample(key)) {
