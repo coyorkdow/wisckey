@@ -753,19 +753,59 @@ class PosixEnv : public Env {
   //
   // This structure is thread-safe beacuse it is immutable.
   struct BackgroundWorkItem {
-    explicit BackgroundWorkItem(void (*function)(void* arg), void* arg)
+    explicit BackgroundWorkItem(void (*function)(void* arg) = nullptr,
+                                void* arg = nullptr)
         : function(function), arg(arg) {}
+    void (*function)(void*);
+    void* arg;
+  };
 
-    void (*const function)(void*);
-    void* const arg;
+  class WorkQueue {
+    using sequence = long long;
+
+   public:
+    explicit WorkQueue(uint32_t size) : cap_(size), head_(0), tail_(0) {
+      assert(InitCheck(cap_));
+      que_.resize(cap_);
+    }
+
+#define INDEX(i) (i & (cap_ - 1))
+    bool empty() const { return tail_ == head_; }
+
+    bool TryDequeue(BackgroundWorkItem& item) {
+      if (tail_ == head_) return false;
+      item = que_[INDEX(tail_++)];
+      return true;
+    }
+
+    bool TryEnqueue(void (*function)(void* arg), void* arg) {
+      if (head_ - tail_ == cap_) return false;
+      que_[INDEX(head_++)] = BackgroundWorkItem(function, arg);
+      return true;
+    }
+#undef INDEX
+
+   private:
+    static bool InitCheck(uint32_t size) {
+      int cnt = 0;
+      while (size) {
+        if (size & 1) cnt++;
+        size >>= 1;
+      }
+      return cnt == 1;
+    }
+
+    sequence head_;
+    sequence tail_;
+    std::vector<BackgroundWorkItem> que_;
+    int cap_;
   };
 
   port::Mutex background_work_mutex_;
   port::CondVar background_work_cv_ GUARDED_BY(background_work_mutex_);
   bool started_background_thread_ GUARDED_BY(background_work_mutex_);
 
-  std::queue<BackgroundWorkItem> background_work_queue_
-      GUARDED_BY(background_work_mutex_);
+  WorkQueue background_work_queue_ GUARDED_BY(background_work_mutex_);
 
   PosixLockTable locks_;  // Thread-safe.
   Limiter mmap_limiter_;  // Thread-safe.
@@ -799,6 +839,7 @@ PosixEnv::PosixEnv()
     : background_work_cv_(&background_work_mutex_),
       started_background_thread_(false),
       mmap_limiter_(MaxMmaps()),
+      background_work_queue_(1024),
       fd_limiter_(MaxOpenFiles()) {}
 
 void PosixEnv::Schedule(
@@ -820,7 +861,9 @@ void PosixEnv::Schedule(
     background_work_cv_.Signal();
   }
 
-  background_work_queue_.emplace(background_work_function, background_work_arg);
+  while (!background_work_queue_.TryEnqueue(background_work_function,
+                                            background_work_arg))
+    ;
   background_work_mutex_.Unlock();
 }
 
@@ -834,9 +877,10 @@ void PosixEnv::BackgroundThreadMain() {
     }
 
     assert(!background_work_queue_.empty());
-    auto background_work_function = background_work_queue_.front().function;
-    void* background_work_arg = background_work_queue_.front().arg;
-    background_work_queue_.pop();
+    BackgroundWorkItem item;
+    background_work_queue_.TryDequeue(item);
+    auto background_work_function = item.function;
+    void* background_work_arg = item.arg;
 
     background_work_mutex_.Unlock();
     background_work_function(background_work_arg);
