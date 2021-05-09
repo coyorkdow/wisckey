@@ -7,7 +7,8 @@
 #include "db/db_impl.h"
 #include "db/dbformat.h"
 #include "db/filename.h"
-#include <iostream>
+#include <queue>
+#include <thread>
 #include <vector>
 
 #include "leveldb/env.h"
@@ -131,6 +132,14 @@ class DBIter : public Iterator {
   size_t bytes_until_read_sampling_;
 };
 
+struct TaskQueue {
+  TaskQueue() : tail_(0), con_(&mutex_) {}
+  std::queue<std::pair<uint64_t, uint64_t>> que_;
+  size_t tail_;
+  port::Mutex mutex_;
+  port::CondVar con_;
+};
+
 class ConcurrenceDBIter : public Iterator {
   friend class DBImpl;
   const size_t MAX_SIZE = 1024;
@@ -144,8 +153,12 @@ class ConcurrenceDBIter : public Iterator {
         cur_index_(1ULL << 63),
         tot_tasks_(0),
         completed_tasks_(0),
-        data_size_(0) {
+        data_size_(0),
+        closing_(false) {
     buffer_queue_.resize(MAX_SIZE);
+    for (int i = 0; i < 32; i++) {
+      threads_.emplace_back(std::move(std::thread(Worker, this, i)));
+    }
   }
 
   ConcurrenceDBIter(const ConcurrenceDBIter&) = delete;
@@ -154,7 +167,12 @@ class ConcurrenceDBIter : public Iterator {
   ~ConcurrenceDBIter() override {
     while (completed_tasks_.load(std::memory_order_acquire) != tot_tasks_)
       ;
+    closing_.store(true, std::memory_order_release);
+    sched_yield();
+    task_ques_.con_.SignalAll();
+    for (auto& t : threads_) t.join();
   }
+
   bool Valid() const override {
     return buffer_queue_[cur_index_ % MAX_SIZE].valid_;
   }
@@ -233,6 +251,35 @@ class ConcurrenceDBIter : public Iterator {
     GetValue(back_++ % MAX_SIZE, cur_index_);
   }
 
+  static void Worker(ConcurrenceDBIter* iter, int q) {
+    auto& queue = iter->task_ques_;
+    auto db = iter->dbIter_.db_;
+    while (true) {
+      queue.mutex_.Lock();
+      while (queue.que_.empty()) {
+        if (iter->closing_.load(std::memory_order_acquire)) {
+          break;
+        };
+        queue.con_.Wait();
+      }
+
+      if (iter->closing_.load(std::memory_order_acquire)) {
+        break;
+      }
+
+      auto& item = iter->buffer_queue_[queue.que_.front().first];
+      uint64_t seq = queue.que_.front().second;
+      queue.que_.pop();
+      queue.mutex_.Unlock();
+
+      db->Fetch(item.addr_, &item.val_);
+      item.sequence.store(seq, std::memory_order_release);
+      iter->data_size_.fetch_add(item.val_.size(), std::memory_order_release);
+      iter->completed_tasks_.fetch_add(1, std::memory_order_relaxed);
+    }
+    queue.mutex_.Unlock();
+  }
+
   bool GetValue(size_t i, uint64_t seq) {
     buffer_queue_[i].sequence = 0;
     if (!dbIter_.valid_) {
@@ -249,10 +296,18 @@ class ConcurrenceDBIter : public Iterator {
       buffer_queue_[i].addr_ = std::move(dbIter_.saved_addr_);
     }
     tot_tasks_++;
-    dbIter_.db_->ConcurrenceFetch(buffer_queue_[i], seq, &completed_tasks_,
-                                  &data_size_);
+    task_ques_.mutex_.Lock();
+    if (task_ques_.que_.empty()) {
+      task_ques_.con_.Signal();
+    }
+    task_ques_.que_.push(std::make_pair(i, seq));
+    task_ques_.mutex_.Unlock();
     return true;
   }
+
+  std::vector<std::thread> threads_;
+  TaskQueue task_ques_;
+  std::atomic<bool> closing_;
 
   uint64_t tot_tasks_;
 
