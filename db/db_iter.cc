@@ -7,6 +7,7 @@
 #include "db/db_impl.h"
 #include "db/dbformat.h"
 #include "db/filename.h"
+#include <iostream>
 #include <vector>
 
 #include "leveldb/env.h"
@@ -140,14 +141,20 @@ class ConcurrenceDBIter : public Iterator {
       : dbIter_(db, cmp, iter, s, seed),
         front_(1ULL << 63),
         back_(1ULL << 63),
-        cur_index_(1ULL << 63) {
+        cur_index_(1ULL << 63),
+        tot_tasks_(0),
+        completed_tasks_(0),
+        data_size_(0) {
     buffer_queue_.resize(MAX_SIZE);
   }
 
   ConcurrenceDBIter(const ConcurrenceDBIter&) = delete;
   ConcurrenceDBIter& operator=(const ConcurrenceDBIter&) = delete;
 
-  ~ConcurrenceDBIter() override = default;
+  ~ConcurrenceDBIter() override {
+    while (completed_tasks_.load(std::memory_order_acquire) != tot_tasks_)
+      ;
+  }
   bool Valid() const override {
     return buffer_queue_[cur_index_ % MAX_SIZE].valid_;
   }
@@ -155,6 +162,11 @@ class ConcurrenceDBIter : public Iterator {
     size_t i = cur_index_ % MAX_SIZE;
     assert(buffer_queue_[i].valid_);
     return buffer_queue_[i].key_;
+  }
+  uint64_t datasize() const override {
+    while (completed_tasks_.load(std::memory_order_acquire) != tot_tasks_)
+      ;
+    return data_size_;
   }
   Slice value() const override {
     size_t i = cur_index_ % MAX_SIZE;
@@ -175,8 +187,8 @@ class ConcurrenceDBIter : public Iterator {
         dbIter_.Next();
         if (!GetValue(back_++ % MAX_SIZE, s)) break;
       }
+      while (back_ - front_ > MAX_SIZE) front_++;
     }
-    while (back_ - front_ > MAX_SIZE) front_++;
   }
 
   void Prev() override {
@@ -185,9 +197,9 @@ class ConcurrenceDBIter : public Iterator {
         dbIter_.Prev();
         if (!GetValue(--front_ % MAX_SIZE, s)) break;
       }
+      while (back_ - front_ > MAX_SIZE) back_--;
     }
     cur_index_--;
-    while (back_ - front_ > MAX_SIZE) back_--;
   }
 
   void Seek(const Slice& target) override {
@@ -214,6 +226,10 @@ class ConcurrenceDBIter : public Iterator {
     front_ = 1ULL << 63;
     back_ = 1ULL << 63;
     cur_index_ = 1ULL << 63;
+    while (completed_tasks_.load(std::memory_order_acquire) != tot_tasks_)
+      ;
+    completed_tasks_ = 0;
+    tot_tasks_ = 0;
     GetValue(back_++ % MAX_SIZE, cur_index_);
   }
 
@@ -225,14 +241,23 @@ class ConcurrenceDBIter : public Iterator {
     }
     buffer_queue_[i].valid_ = true;
     buffer_queue_[i].key_ = std::move(dbIter_.key().ToString());
+    data_size_.fetch_add(buffer_queue_[i].key_.size(),
+                         std::memory_order_relaxed);
     if (dbIter_.direction_ == DBIter::kForward) {
       buffer_queue_[i].addr_ = std::move(dbIter_.iter_->value().ToString());
     } else {
       buffer_queue_[i].addr_ = std::move(dbIter_.saved_addr_);
     }
-    dbIter_.db_->ConcurrenceFetch(buffer_queue_[i], seq);
+    tot_tasks_++;
+    dbIter_.db_->ConcurrenceFetch(buffer_queue_[i], seq, &completed_tasks_,
+                                  &data_size_);
     return true;
   }
+
+  uint64_t tot_tasks_;
+
+  alignas(64) std::atomic<uint64_t> completed_tasks_;
+  alignas(64) std::atomic<uint64_t> data_size_;
 };
 
 inline bool DBIter::ParseKey(ParsedInternalKey* ikey) {

@@ -30,6 +30,8 @@ class LEVELDB_EXPORT Iterator {
 
   virtual ~Iterator();
 
+  virtual uint64_t datasize() const { return 0; }
+
   // An iterator is either positioned at a key/value pair, or
   // not valid.  This method returns true iff the iterator is valid.
   virtual bool Valid() const = 0;

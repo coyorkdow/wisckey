@@ -1163,11 +1163,15 @@ Status DBImpl::Fetch(Slice addr, std::string* value) {
   return vlog_manager_.FetchValueFromVlog(addr, value);
 }
 
-void DBImpl::ConcurrenceFetch(IterCache& cache, uint64_t seq) {
-  void** argv = reinterpret_cast<void**>(malloc(3 * sizeof(uint64_t*)));
+void DBImpl::ConcurrenceFetch(IterCache& cache, uint64_t seq,
+                              std::atomic<uint64_t>* cnt,
+                              std::atomic<uint64_t>* data_size) {
+  void** argv = reinterpret_cast<void**>(malloc(5 * sizeof(uint64_t*)));
   argv[0] = this;
   argv[1] = &cache;
   EncodeFixed64(reinterpret_cast<char*>(&argv[2]), seq);
+  argv[3] = cnt;
+  argv[4] = data_size;
   env_->Schedule(&DBImpl::BGFetch, argv);
 }
 
@@ -1176,8 +1180,11 @@ void DBImpl::BGFetch(void* args) {
   DBImpl* db = reinterpret_cast<DBImpl*>(argv[0]);
   IterCache* cache = reinterpret_cast<IterCache*>(argv[1]);
   cache->status = db->Fetch(cache->addr_, &cache->val_);
-  cache->sequence.store(DecodeFixed64(reinterpret_cast<char*>(&argv[2])),
-                        std::memory_order_release);
+  cache->sequence.store(DecodeFixed64(reinterpret_cast<char*>(&argv[2])));
+  //  MutexLock l(&db->mutex_);
+  reinterpret_cast<std::atomic<uint64_t>*>(argv[3])->fetch_add(1);
+  reinterpret_cast<std::atomic<uint64_t>*>(argv[4])->fetch_add(
+      cache->val_.size());
   free(args);
 }
 
