@@ -145,6 +145,7 @@ class DBImpl : public DB {
 
   void MaybeScheduleCompaction() EXCLUSIVE_LOCKS_REQUIRED(mutex_);
   static void BGWork(void* db);
+  static void BGAppendLog(void *args);
   void BackgroundCall();
   void BackgroundCompaction() EXCLUSIVE_LOCKS_REQUIRED(mutex_);
   void CleanupCompaction(CompactionState* compact)
@@ -186,6 +187,7 @@ class DBImpl : public DB {
   WritableFile* logfile_;
   uint64_t logfile_number_ GUARDED_BY(mutex_);
   log::Writer* log_;
+  std::atomic<bool> log_complete_;
   uint64_t vlogfile_number_ GUARDED_BY(mutex_);
   size_t vlog_head_;
   vlog::VlogManager vlog_manager_;

@@ -577,7 +577,7 @@ void DBImpl::CompactMemTable() {
   mutex_.AssertHeld();
   assert(imm_ != nullptr);
 
-//  vlog_manager_.Sync();
+  //  vlog_manager_.Sync();
 
   // Save the contents of the memtable as a new Table
   VersionEdit edit;
@@ -1232,6 +1232,22 @@ Status DBImpl::Delete(const WriteOptions& options, const Slice& key) {
   return DB::Delete(options, key);
 }
 
+void DBImpl::BGAppendLog(void* args) {
+  auto* db = reinterpret_cast<DBImpl*>(reinterpret_cast<void**>(args)[0]);
+  auto* write_batch =
+      reinterpret_cast<WriteBatch*>(reinterpret_cast<void**>(args)[1]);
+  bool* sync_error = reinterpret_cast<bool*>(reinterpret_cast<void**>(args)[2]);
+  Status status =
+      db->log_->AddRecord(WriteBatchInternal::Contents(write_batch));
+  if (status.ok() && sync_error != nullptr) {
+    status = db->logfile_->Sync();
+    if (!status.ok()) {
+      *sync_error = true;
+    }
+  }
+  db->log_complete_.store(true, std::memory_order_release);
+}
+
 Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
   Writer w(&mutex_);
   w.batch = updates;
@@ -1261,26 +1277,30 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
     // and protects against concurrent loggers and concurrent writes
     // into mem_.
     uint64_t vlog_file_number = vlogfile_number_;
+    log_complete_ = false;
     {
       mutex_.Unlock();
-      status = log_->AddRecord(WriteBatchInternal::Contents(write_batch));
       bool sync_error = false;
-      if (status.ok() && options.sync) {
-        status = logfile_->Sync();
-        if (!status.ok()) {
-          sync_error = true;
-        }
+      void** args = new void*[3];
+      args[0] = this;
+      args[1] = write_batch;
+      if (options.sync) {
+        args[2] = &sync_error;
+      } else {
+        args[2] = nullptr;
       }
+      env_->Schedule(&DBImpl::BGAppendLog, args);
+      status =
+          vlog_manager_.AddRecord(WriteBatchInternal::Contents(write_batch));
       if (status.ok()) {
-        status =
-            vlog_manager_.AddRecord(WriteBatchInternal::Contents(write_batch));
-        if (status.ok()) {
-          vlog_head_ += vlog::kVHeaderSize;
-          status = WriteBatchInternal::InsertAddressInto(
-              write_batch, vlog_file_number, mem_, &vlog_head_);
-        }
+        vlog_head_ += vlog::kVHeaderSize;
+        status = WriteBatchInternal::InsertAddressInto(
+            write_batch, vlog_file_number, mem_, &vlog_head_);
       }
+      while (!log_complete_.load(std::memory_order_acquire))
+        ;
       mutex_.Lock();
+      delete[] args;
       if (sync_error) {
         // The state of the log file is indeterminate: the log record we
         // just added may or may not show up when the DB is re-opened.

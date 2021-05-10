@@ -808,14 +808,13 @@ void PosixEnv::Schedule(
   // Start the background thread, if we haven't done so already.
   if (!started_background_thread_) {
     started_background_thread_ = true;
-    std::thread background_thread(PosixEnv::BackgroundThreadEntryPoint, this);
-    background_thread.detach();
+    for (int i = 0; i < 32; i++) {
+      std::thread background_thread(PosixEnv::BackgroundThreadEntryPoint, this);
+      background_thread.detach();
+    }
   }
 
-  // If the queue is empty, the background thread may be waiting for work.
-  if (background_work_queue_.empty()) {
-    background_work_cv_.Signal();
-  }
+  background_work_cv_.Signal();
 
   background_work_queue_.emplace(background_work_function, background_work_arg);
   background_work_mutex_.Unlock();
