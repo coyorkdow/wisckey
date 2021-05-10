@@ -21,9 +21,9 @@ VWriter::VWriter(WritableFile* dest) : dest_(dest) {}
 
 VWriter::~VWriter() = default;
 
-Status VWriter::AddRecord(const Slice& slice) {
+Status VWriter::AddRecord(const Slice& slice, bool sync) {
   const char* ptr = slice.data();
-  size_t left = slice.size();
+  const size_t left = slice.size();
   char head[kVHeaderSize];
   uint32_t crc = crc32c::Extend(0, ptr, left);
   crc = crc32c::Mask(crc);  // Adjust for storage
@@ -32,14 +32,10 @@ Status VWriter::AddRecord(const Slice& slice) {
 
   Status s;
 
-  if (my_info_->size_ + kVHeaderSize + left > WriteBufferSize) {
-    WLock l(my_info_->rwlock_);
-    if (!(s = dest_->SyncedAppend(Slice(my_info_->buffer_, my_info_->size_)))
-             .ok()) {
-      return s;
-    }
-    my_info_->head_ += my_info_->size_;
-    my_info_->size_ = 0;
+  WLock l(my_info_->rwlock_);
+  if (sync || my_info_->size_ + kVHeaderSize + left > WriteBufferSize) {
+    if (!(s = Flush()).ok()) return s;
+
     if (kVHeaderSize + left > WriteBufferSize) {
       s = dest_->SyncedAppend(Slice(head, kVHeaderSize));
       my_info_->head_ += kVHeaderSize;
@@ -53,6 +49,7 @@ Status VWriter::AddRecord(const Slice& slice) {
     }
     return s;
   }
+  l.Unlock();
 
   memcpy(my_info_->buffer_ + my_info_->size_, head, kVHeaderSize);
   my_info_->size_ += kVHeaderSize;
@@ -60,6 +57,18 @@ Status VWriter::AddRecord(const Slice& slice) {
   my_info_->size_ += left;
 
   return s;
+}
+
+Status VWriter::Flush() {
+  my_info_->rwlock_->AssertHeld();
+  Status s;
+  s = dest_->SyncedAppend(Slice(my_info_->buffer_, my_info_->size_));
+  if (!s.ok()) {
+    return s;
+  }
+  my_info_->head_ += my_info_->size_;
+  my_info_->size_ = 0;
+  return Status::OK();
 }
 
 }  // namespace vlog

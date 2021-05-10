@@ -69,19 +69,19 @@ class SpinSharedMutex : public SharedMutex {
     do {
       expect = UNLOCKED;
     } while (!lock_.compare_exchange_weak(expect, UNIQUE_LOCKED,
-                                          std::memory_order_acq_rel));
+                                          std::memory_order_seq_cst));
   }
   void UniqueUnlock() override {
     assert(lock_ & UNIQUE_LOCKED);
-    lock_.fetch_sub(UNIQUE_LOCKED, std::memory_order_release);
+    lock_.fetch_sub(UNIQUE_LOCKED, std::memory_order_seq_cst);
   }
   void SharedLock() override {
-    lock_.fetch_add(1, std::memory_order_acquire);
-    while (lock_.load(std::memory_order_acquire) > UNIQUE_LOCKED)
+    lock_.fetch_add(1, std::memory_order_seq_cst);
+    while (lock_.load(std::memory_order_seq_cst) > UNIQUE_LOCKED)
       ;
   }
   void SharedUnlock() override {
-    lock_.fetch_sub(1, std::memory_order_release);
+    lock_.fetch_sub(1, std::memory_order_seq_cst);
   }
 
  private:

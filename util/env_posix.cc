@@ -135,13 +135,6 @@ class PosixSequentialFile final : public SequentialFile {
     return Status::OK();
   }
 
-  Status Jump(uint64_t n) override {
-    if (::lseek(fd_, n, SEEK_SET) == static_cast<off_t>(-1)) {
-      return PosixError(filename_, errno);
-    }
-    return Status::OK();
-  }
-
  private:
   const int fd_;
   const std::string filename_;
@@ -554,11 +547,17 @@ class PosixEnv : public Env {
   }
 
   Status NewNonMmapRandomAccessFile(const std::string& filename,
-                                    RandomAccessFile** result) override {
+                                    RandomAccessFile** result,
+                                    size_t* off_end) override {
     *result = nullptr;
     int fd = ::open(filename.c_str(), O_RDONLY | kOpenBaseFlags);
     if (fd < 0) {
       return PosixError(filename, errno);
+    }
+
+    if (off_end != nullptr) {
+      *off_end = ::lseek(fd, 0, SEEK_END);
+      ::lseek(fd, 0, SEEK_SET);
     }
 
     *result = new PosixRandomAccessFile(filename, fd, &fd_limiter_);

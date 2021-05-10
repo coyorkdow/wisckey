@@ -263,8 +263,8 @@ class SpecialEnv : public EnvWrapper {
   }
 
   Status NewNonMmapRandomAccessFile(const std::string& filename,
-                                    RandomAccessFile** result) {
-    Status s = target()->NewNonMmapRandomAccessFile(filename, result);
+                                    RandomAccessFile** result, size_t *size) {
+    Status s = target()->NewNonMmapRandomAccessFile(filename, result, size);
     return s;
   }
 
@@ -667,8 +667,10 @@ TEST_F(DBTest, GetFromImmutableLayer) {
 
     // Block sync calls.
     env_->delay_data_sync_.store(true, std::memory_order_release);
-    Put("k1", std::string(100000, 'x'));  // Fill memtable.
-    Put("k2", std::string(100000, 'y'));  // Trigger compaction.
+    // Fill memtable.
+    Put(std::string(100000, 'x'), std::string(100000, 'x'));
+    // Trigger compaction.
+    Put(std::string(100000, 'y'), std::string(100000, 'y'));
     ASSERT_EQ("v1", Get("foo"));
     // Release sync calls.
     env_->delay_data_sync_.store(false, std::memory_order_release);

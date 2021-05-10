@@ -62,15 +62,14 @@ Status VlogFetcher::Get(const uint64_t offset, const uint64_t size,
 }
 
 VlogFetcher::VlogFetcher(const std::string& dbname, const Options& options,
-                         const uint32_t log_number) {
+                         const uint32_t log_number, size_t* size) {
   Status s = options.env->NewNonMmapRandomAccessFile(
-      LogFileName(dbname, log_number), &file_);
+      VlogFileName(dbname, log_number), &file_, size);
+
   assert(s.ok());
 }
 
-VlogFetcher::~VlogFetcher() {
-  delete file_;
-}
+VlogFetcher::~VlogFetcher() { delete file_; }
 
 }  // namespace vlog
 }  // namespace leveldb

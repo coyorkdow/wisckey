@@ -193,20 +193,12 @@ class VersionSet {
   // Allocate and return a new file number
   uint64_t NewFileNumber() { return next_file_number_++; }
 
-  uint64_t NewVlogNumber() { return ++log_number_; }
-
   // Arrange to reuse "file_number" unless a newer file number has
   // already been allocated.
   // REQUIRES: "file_number" was returned by a call to NewFileNumber().
   void ReuseFileNumber(uint64_t file_number) {
     if (next_file_number_ == file_number + 1) {
       next_file_number_ = file_number;
-    }
-  }
-
-  void ReuseVlogNumber(uint64_t file_number) {
-    if (log_number_ == file_number) {
-      log_number_ = file_number - 1;
     }
   }
 
@@ -318,6 +310,7 @@ class VersionSet {
   uint64_t manifest_file_number_;
   uint64_t last_sequence_;
   uint64_t log_number_;
+  uint64_t vlog_number_;
   uint64_t prev_log_number_;  // 0 or backing store for memtable being compacted
 
   uint64_t head_info_;

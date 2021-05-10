@@ -27,7 +27,7 @@ class VlogManager;
 class VlogFetcher {
  public:
   VlogFetcher(const std::string& dbname, const Options& options,
-              uint32_t log_number);
+              uint32_t log_number, size_t* size);
 
   ~VlogFetcher();
 

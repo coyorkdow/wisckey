@@ -16,8 +16,8 @@ VlogManager::VlogManager(uint64_t clean_threshold)
 VlogManager::~VlogManager() {
   for (auto& it : manager_) {
     if (it.first == cur_vlog_) {
-      it.second->vlog_write_->dest_->SyncedAppend(
-          Slice(it.second->buffer_, it.second->size_));
+      WLock l(it.second->rwlock_);
+      it.second->vlog_write_->Flush();
     }
     delete it.second->vlog_fetch_;
     delete it.second->vlog_write_->dest_;
@@ -26,27 +26,38 @@ VlogManager::~VlogManager() {
   }
 }
 
+bool VlogManager::Empty() const { return manager_.empty(); }
+
 void VlogManager::AddVlog(const std::string& dbname, const Options& options,
                           uint64_t vlog_numb) {
-  VlogInfo* old = manager_[vlog_numb];
-  if (old != nullptr) {
-    old->vlog_write_->dest_->SyncedAppend(Slice(old->buffer_, old->size_));
+  if (!Empty()) {
+    assert(manager_.count(cur_vlog_));
+    VlogInfo* old = manager_[cur_vlog_];
+    WLock l(old->rwlock_);
+    old->vlog_write_->Flush();
   }
   VlogInfo* v = new VlogInfo;
   v->vlog_write_ = new VWriter;
-  Status s = options.env->NewAppendableFile(LogFileName(dbname, vlog_numb),
+  Status s = options.env->NewAppendableFile(VlogFileName(dbname, vlog_numb),
                                             &v->vlog_write_->dest_);
   assert(s.ok());
   // VlogFetcher must initialize after WritableFile is created;
-  v->vlog_fetch_ = new VlogFetcher(dbname, options, vlog_numb);
+  v->vlog_fetch_ = new VlogFetcher(dbname, options, vlog_numb, &v->head_);
   v->vlog_write_->my_info_ = v;
   v->vlog_fetch_->my_info_ = v;
   v->count_ = 0;
+  assert(!manager_.count(vlog_numb));
   manager_[vlog_numb] = v;
   cur_vlog_ = vlog_numb;
 }
 
 void VlogManager::SetCurrentVlog(uint64_t vlog_numb) { cur_vlog_ = vlog_numb; }
+
+size_t VlogManager::GetCurrentVlogHead() const {
+  assert(manager_.count(cur_vlog_));
+  VlogInfo* cur = manager_.find(cur_vlog_)->second;
+  return cur->size_ + cur->head_;
+}
 
 Status VlogManager::FetchValueFromVlog(Slice addr, std::string* value) {
   Status s;
@@ -75,21 +86,12 @@ Status VlogManager::AddRecord(const Slice& slice) {
   assert(iter->second != nullptr);
   return iter->second->vlog_write_->AddRecord(slice);
 }
-Status VlogManager::Sync() {
-  std::map<uint64_t, VlogInfo*>::const_iterator iter = manager_.find(cur_vlog_);
-  assert(iter != manager_.end());
-  assert(iter->second != nullptr);
-  return iter->second->vlog_write_->dest_->Sync();
-}
 
-Status VlogManager::SetHead(size_t offset) {
-  std::map<uint64_t, VlogInfo*>::const_iterator iter = manager_.find(cur_vlog_);
-  if (iter == manager_.end() || iter->second->vlog_fetch_ == nullptr) {
-    return Status::Corruption("can not find vlog");
-  } else {
-    iter->second->head_ = offset;
-    return Status::OK();
-  }
+Status VlogManager::Sync() {
+  assert(manager_.count(cur_vlog_));
+  VlogInfo* cur = manager_[cur_vlog_];
+  WLock l(cur->rwlock_);
+  return cur->vlog_write_->Flush();
 }
 
 }  // namespace vlog

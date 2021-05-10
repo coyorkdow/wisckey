@@ -29,7 +29,9 @@ class VWriter {
 
   ~VWriter();
 
-  Status AddRecord(const Slice& slice);
+  Status AddRecord(const Slice& slice, bool sync = false);
+
+  Status Flush();
 
   friend class VlogManager;
 

@@ -153,9 +153,5 @@ void VReader::ReportDrop(uint64_t bytes, const Status& reason) {
   }
 }
 
-bool VReader::DeallocateDiskSpace(uint64_t offset, size_t len) {
-  return file_->DeallocateDiskSpace(offset, len).ok();
-}
-
 }  // namespace vlog
 }  // namespace leveldb

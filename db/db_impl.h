@@ -183,11 +183,12 @@ class DBImpl : public DB {
   MemTable* mem_;
   MemTable* imm_ GUARDED_BY(mutex_);  // Memtable being compacted
   std::atomic<bool> has_imm_;         // So bg thread can detect non-null imm_
+  WritableFile* logfile_;
+  uint64_t logfile_number_ GUARDED_BY(mutex_);
+  log::Writer* log_;
   uint64_t vlogfile_number_ GUARDED_BY(mutex_);
   size_t vlog_head_;
   vlog::VlogManager vlog_manager_;
-  static const int buffer_size_ = 409600;
-  char buffer_[buffer_size_] GUARDED_BY(mutex_);
   uint32_t seed_ GUARDED_BY(mutex_);  // For sampling.
 
   // Queue of writers.

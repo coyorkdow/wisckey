@@ -15,7 +15,7 @@ namespace vlog {
 // Header is checksum (4 bytes), length (8 bytes).
 static const int kVHeaderSize = 4 + 8;
 
-static const int WriteBufferSize = 1 << 12;
+static const int WriteBufferSize = 1024 * 16;
 
 class VlogFetcher;
 class VWriter;
@@ -48,9 +48,11 @@ class VlogManager {
   void AddVlog(const std::string& dbname, const Options& options,
                uint64_t vlog_numb);
 
-  Status AddRecord(const Slice& slice);
+  bool Empty() const;
 
-  Status SetHead(size_t offset);
+  size_t GetCurrentVlogHead() const;
+
+  Status AddRecord(const Slice& slice);
 
   Status Sync();
 

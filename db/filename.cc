@@ -4,11 +4,12 @@
 
 #include "db/filename.h"
 
+#include "db/dbformat.h"
 #include <cassert>
 #include <cstdio>
 
-#include "db/dbformat.h"
 #include "leveldb/env.h"
+
 #include "util/logging.h"
 
 namespace leveldb {
@@ -28,6 +29,11 @@ static std::string MakeFileName(const std::string& dbname, uint64_t number,
 std::string LogFileName(const std::string& dbname, uint64_t number) {
   assert(number > 0);
   return MakeFileName(dbname, number, "log");
+}
+
+std::string VlogFileName(const std::string& dbname, uint64_t number) {
+  assert(number > 0);
+  return MakeFileName(dbname, number, "vlog");
 }
 
 std::string TableFileName(const std::string& dbname, uint64_t number) {
@@ -106,7 +112,9 @@ bool ParseFileName(const std::string& filename, uint64_t* number,
       return false;
     }
     Slice suffix = rest;
-    if (suffix == Slice(".log")) {
+    if (suffix == Slice(".vlog")) {
+      *type = kVlogFile;
+    } else if (suffix == Slice(".log")) {
       *type = kLogFile;
     } else if (suffix == Slice(".sst") || suffix == Slice(".ldb")) {
       *type = kTableFile;

@@ -35,7 +35,6 @@ class VReader {
   ~VReader();
 
   bool ReadRecord(Slice* record, std::string* scratch);
-  bool DeallocateDiskSpace(uint64_t offset, size_t len);
 
  private:
   port::Mutex mutex_;

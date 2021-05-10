@@ -36,15 +36,26 @@ class SCOPED_LOCKABLE MutexLock {
 
 class SCOPED_LOCKABLE WLock {
  public:
-  explicit WLock(port::SharedMutex* mu) EXCLUSIVE_LOCK_FUNCTION(mu) : mu_(mu) {
+  explicit WLock(port::SharedMutex* mu) EXCLUSIVE_LOCK_FUNCTION(mu)
+      : free(false), mu_(mu) {
     this->mu_->UniqueLock();
   }
-  ~WLock() UNLOCK_FUNCTION() { this->mu_->UniqueUnlock(); }
+
+  ~WLock() UNLOCK_FUNCTION() {
+    if (!free) this->mu_->UniqueUnlock();
+  }
+
+  void Unlock() {
+    this->mu_->AssertHeld();
+    this->mu_->UniqueUnlock();
+    free = true;
+  }
 
   WLock(const WLock&) = delete;
   WLock& operator=(const WLock&) = delete;
 
  private:
+  bool free;
   port::SharedMutex* const mu_;
 };
 
