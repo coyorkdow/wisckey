@@ -134,7 +134,7 @@ class DBIter : public Iterator {
 
 struct TaskQueue {
   TaskQueue() : tail_(0), con_(&mutex_) {}
-  std::queue<std::pair<uint64_t, uint64_t>> que_;
+  std::vector<std::pair<uint64_t, uint64_t>> que_;
   size_t tail_;
   port::Mutex mutex_;
   port::CondVar con_;
@@ -256,7 +256,7 @@ class ConcurrenceDBIter : public Iterator {
     auto db = iter->dbIter_.db_;
     while (true) {
       queue.mutex_.Lock();
-      while (queue.que_.empty()) {
+      while (queue.tail_ == queue.que_.size()) {
         if (iter->closing_.load(std::memory_order_acquire)) {
           break;
         };
@@ -267,9 +267,10 @@ class ConcurrenceDBIter : public Iterator {
         break;
       }
 
-      auto& item = iter->buffer_queue_[queue.que_.front().first];
-      uint64_t seq = queue.que_.front().second;
-      queue.que_.pop();
+      auto& item = iter->buffer_queue_[queue.que_[queue.tail_].first];
+      uint64_t seq = queue.que_[queue.tail_].second;
+//      queue.que_.pop();
+      queue.tail_++;
       queue.mutex_.Unlock();
 
       db->Fetch(item.addr_, &item.val_);
@@ -297,10 +298,10 @@ class ConcurrenceDBIter : public Iterator {
     }
     tot_tasks_++;
     task_ques_.mutex_.Lock();
-    if (task_ques_.que_.empty()) {
+    if (task_ques_.tail_ == task_ques_.que_.size()) {
       task_ques_.con_.Signal();
     }
-    task_ques_.que_.push(std::make_pair(i, seq));
+    task_ques_.que_.emplace_back(i, seq);
     task_ques_.mutex_.Unlock();
     return true;
   }
