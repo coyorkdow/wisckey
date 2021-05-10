@@ -133,8 +133,9 @@ class DBIter : public Iterator {
 };
 
 struct TaskQueue {
-  TaskQueue() : tail_(0), con_(&mutex_) {}
+  TaskQueue() : head_(0), tail_(0), con_(&mutex_) { que_.resize(1024); }
   std::vector<std::pair<uint64_t, uint64_t>> que_;
+  size_t head_;
   size_t tail_;
   port::Mutex mutex_;
   port::CondVar con_;
@@ -253,10 +254,11 @@ class ConcurrenceDBIter : public Iterator {
 
   static void Worker(ConcurrenceDBIter* iter, int q) {
     auto& queue = iter->task_ques_;
+#define TAIL (queue.que_[queue.tail_ % queue.que_.size()])
     auto db = iter->dbIter_.db_;
     while (true) {
       queue.mutex_.Lock();
-      while (queue.tail_ == queue.que_.size()) {
+      while (queue.tail_ == queue.head_) {
         if (iter->closing_.load(std::memory_order_acquire)) {
           break;
         };
@@ -267,9 +269,9 @@ class ConcurrenceDBIter : public Iterator {
         break;
       }
 
-      auto& item = iter->buffer_queue_[queue.que_[queue.tail_].first];
-      uint64_t seq = queue.que_[queue.tail_].second;
-//      queue.que_.pop();
+      auto& item = iter->buffer_queue_[TAIL.first];
+      uint64_t seq = TAIL.second;
+      //      queue.que_.pop();
       queue.tail_++;
       queue.mutex_.Unlock();
 
@@ -278,6 +280,7 @@ class ConcurrenceDBIter : public Iterator {
       iter->data_size_.fetch_add(item.val_.size(), std::memory_order_release);
       iter->completed_tasks_.fetch_add(1, std::memory_order_relaxed);
     }
+#undef TAIL
     queue.mutex_.Unlock();
   }
 
@@ -298,10 +301,15 @@ class ConcurrenceDBIter : public Iterator {
     }
     tot_tasks_++;
     task_ques_.mutex_.Lock();
-    if (task_ques_.tail_ == task_ques_.que_.size()) {
+#define HEAD (task_ques_.que_[task_ques_.head_ % task_ques_.que_.size()])
+    if (task_ques_.tail_ == task_ques_.head_) {
       task_ques_.con_.Signal();
     }
-    task_ques_.que_.emplace_back(i, seq);
+    if (task_ques_.head_ - task_ques_.tail_ == task_ques_.que_.size()) {
+      task_ques_.que_.resize(task_ques_.que_.size() * 2);
+    }
+    HEAD = std::make_pair(i, seq);
+    task_ques_.head_++;
     task_ques_.mutex_.Unlock();
     return true;
   }
