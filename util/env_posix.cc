@@ -762,7 +762,6 @@ class PosixEnv : public Env {
 
   port::Mutex background_work_mutex_;
   port::CondVar background_work_cv_ GUARDED_BY(background_work_mutex_);
-  bool started_background_thread_ GUARDED_BY(background_work_mutex_);
 
   std::queue<BackgroundWorkItem> background_work_queue_
       GUARDED_BY(background_work_mutex_);
@@ -797,23 +796,19 @@ int MaxOpenFiles() {
 
 PosixEnv::PosixEnv()
     : background_work_cv_(&background_work_mutex_),
-      started_background_thread_(false),
       mmap_limiter_(MaxMmaps()),
-      fd_limiter_(MaxOpenFiles()) {}
+      fd_limiter_(MaxOpenFiles()) {
+  // Start the background thread, if we haven't done so already.
+    for (int i = 0; i < 32; i++) {
+      std::thread background_thread(PosixEnv::BackgroundThreadEntryPoint, this);
+      background_thread.detach();
+    }
+}
 
 void PosixEnv::Schedule(
     void (*background_work_function)(void* background_work_arg),
     void* background_work_arg) {
   background_work_mutex_.Lock();
-
-  // Start the background thread, if we haven't done so already.
-  if (!started_background_thread_) {
-    started_background_thread_ = true;
-    for (int i = 0; i < 32; i++) {
-      std::thread background_thread(PosixEnv::BackgroundThreadEntryPoint, this);
-      background_thread.detach();
-    }
-  }
 
   // If the queue is empty, the background thread may be waiting for work.
   if (background_work_queue_.empty()) {
