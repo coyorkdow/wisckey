@@ -22,6 +22,8 @@
 #include "port/port.h"
 #include "port/thread_annotations.h"
 
+#include "db_iter.h"
+
 namespace leveldb {
 
 class MemTable;
@@ -47,8 +49,8 @@ class DBImpl : public DB {
   Status Get(const ReadOptions& options, const Slice& key,
              std::string* value) override;
   Status Fetch(Slice addr, std::string* value);
-
   Iterator* NewIterator(const ReadOptions&) override;
+  Iterator* NewAddrIterator(const ReadOptions&) override;
   const Snapshot* GetSnapshot() override;
   void ReleaseSnapshot(const Snapshot* snapshot) override;
   bool GetProperty(const Slice& property, std::string* value) override;
