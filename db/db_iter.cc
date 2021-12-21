@@ -124,6 +124,25 @@ class DBAddrIter : public Iterator {
   size_t bytes_until_read_sampling_;
 };
 
+class IterCache {
+ public:
+  IterCache() : valid_(false), sequence(0) {}
+  ~IterCache() = default;
+  IterCache(const IterCache& r)
+      : key_(r.key_),
+        addr_(r.addr_),
+        val_(r.val_),
+        valid_(r.valid_),
+        status(r.status),
+        sequence(r.sequence.load(std::memory_order_relaxed)) {}
+  std::string key_;
+  std::string addr_;
+  std::string val_;
+  bool valid_;
+  Status status;
+  std::atomic<uint64_t> sequence;
+};
+
 struct TaskQueue {
   TaskQueue() : head_(0), tail_(0), con_(&mutex_) { que_.resize(512); }
   std::vector<std::pair<uint64_t, uint64_t>> que_;
