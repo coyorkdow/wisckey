@@ -454,6 +454,18 @@ int main() {
   endif(HAVE_KYOTOCABINET)
 endif(LEVELDB_BUILD_BENCHMARKS)
 
+add_executable(create_test_db "")
+target_sources(create_test_db
+        PRIVATE
+        "benchmarks/create_test_db.cpp")
+target_link_libraries(create_test_db leveldb)
+
+add_executable(iterate_test_db "")
+target_sources(iterate_test_db
+        PRIVATE
+        "benchmarks/iterate_test_db.cpp")
+target_link_libraries(iterate_test_db leveldb)
+
 if(LEVELDB_INSTALL)
   install(TARGETS leveldb
     EXPORT leveldbTargets
